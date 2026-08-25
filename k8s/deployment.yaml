@@ -1,0 +1,87 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pharmatrace-agent-orchestrator
+  namespace: serialization
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: pharmatrace-agent-orchestrator
+  template:
+    metadata:
+      labels:
+        app: pharmatrace-agent-orchestrator
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+        - name: migrate
+          image: your-registry/pharmatrace-agent-orchestrator:latest
+          command: ["node", "dist/database/migrate.js"]
+          envFrom:
+            - secretRef:
+                name: pharmatrace-agent-orchestrator
+      containers:
+        - name: orchestrator
+          image: your-registry/pharmatrace-agent-orchestrator:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 3000
+              name: http
+          envFrom:
+            - secretRef:
+                name: pharmatrace-agent-orchestrator
+          env:
+            - name: SECRET_STORAGE_DIR
+              value: /app/.secrets
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: encrypted-secrets
+              mountPath: /app/.secrets
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 20
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 1000m
+              memory: 768Mi
+      volumes:
+        - name: encrypted-secrets
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: pharmatrace-agent-orchestrator
+  namespace: serialization
+spec:
+  type: ClusterIP
+  selector:
+    app: pharmatrace-agent-orchestrator
+  ports:
+    - name: http
+      port: 3000
+      targetPort: http

@@ -1,0 +1,9 @@
+node_modules/
+dist/
+.env
+.secrets/
+coverage/
+*.tsbuildinfo
+npm-debug.log*
+
+README-Dev.md
