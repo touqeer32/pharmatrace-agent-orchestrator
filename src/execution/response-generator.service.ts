@@ -20,6 +20,7 @@ export class ResponseGeneratorService {
     run: AgentRunRecord;
     findings: JsonObject[];
     draft: string;
+    completedToolNames?: string[];
   }): Promise<GeneratedResponse> {
     const result = await generateText({
       model: input.model,
@@ -28,6 +29,8 @@ export class ResponseGeneratorService {
         'Write the final response in English only.',
         'Use only facts present in the authenticated MCP tool results.',
         'Explicitly identify missing information instead of inventing it.',
+        'For lot anchoring, report lots as pushed only when push_lots_to_hedera appears in completedToolNames and its completed result confirms the push.',
+        'If push_lots_to_hedera is absent from completedToolNames, explicitly say that no Hedera anchoring write was completed. Never infer success from list_batch_lots, txID, or a draft.',
         'Never include access tokens, API keys, passwords, or client secrets.',
         input.agent.output_schema
           ? 'Return only valid JSON matching the requested output schema.'
@@ -41,6 +44,7 @@ export class ResponseGeneratorService {
         outputSchema: input.agent.output_schema,
         draft: input.draft,
         authenticatedToolResults: input.findings,
+        completedToolNames: input.completedToolNames ?? input.findings.map((finding) => finding.tool_name),
       }),
     });
 

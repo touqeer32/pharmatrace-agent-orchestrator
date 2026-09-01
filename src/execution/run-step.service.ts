@@ -92,4 +92,26 @@ export class RunStepService {
     );
     return result.rows;
   }
+
+  async unrecoveredToolFailures(runId: string): Promise<JsonObject[]> {
+    const result = await this.database.query<JsonObject>(
+      `SELECT failed.tool_name, failed.error_message, failed.step_number
+       FROM agent_run_steps failed
+       WHERE failed.run_id = $1
+         AND failed.step_type = 'TOOL_CALL'
+         AND failed.status = 'FAILED'
+         AND NOT EXISTS (
+           SELECT 1
+           FROM agent_run_steps succeeded
+           WHERE succeeded.run_id = failed.run_id
+             AND succeeded.step_type = 'TOOL_CALL'
+             AND succeeded.status = 'COMPLETED'
+             AND succeeded.tool_name = failed.tool_name
+             AND succeeded.step_number > failed.step_number
+         )
+       ORDER BY failed.step_number`,
+      [runId],
+    );
+    return result.rows;
+  }
 }

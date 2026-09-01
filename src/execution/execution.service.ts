@@ -13,6 +13,8 @@ import { DatabaseService } from '../database/database.service';
 import { LlmConnectionService } from '../llm/llm-connection.service';
 import { LlmProviderFactory } from '../llm/llm-provider.factory';
 import { McpAccessService } from '../mcp/mcp-access.service';
+import { McpRegistryService } from '../mcp/mcp-registry.service';
+import { KeycloakAuthService } from '../pharmatrace/keycloak-auth.service';
 import { PlanCacheService } from '../planner/plan-cache.service';
 import { PlannerService } from '../planner/planner.service';
 import { ExecutionLoopService } from './execution-loop.service';
@@ -30,6 +32,8 @@ export class ExecutionService {
     private readonly connections: LlmConnectionService,
     private readonly models: LlmProviderFactory,
     private readonly access: McpAccessService,
+    private readonly registry: McpRegistryService,
+    private readonly auth: KeycloakAuthService,
     private readonly planner: PlannerService,
     private readonly plans: PlanCacheService,
     private readonly steps: RunStepService,
@@ -105,6 +109,8 @@ export class ExecutionService {
         throw new BadRequestException('Agent has no enabled, authorized MCP tools');
       }
 
+      await this.authenticateMcpServers(run, authorizedTools);
+
       const connection = await this.connections.get(run.tenant_id, agent.llm_connection_id);
 
       if (connection.provider !== run.llm_provider_snapshot) {
@@ -175,6 +181,21 @@ export class ExecutionService {
         plan,
         authorizedTools,
       });
+
+      const unrecoveredToolFailures = await this.steps.unrecoveredToolFailures(run.id);
+      if (unrecoveredToolFailures.length) {
+        const details = unrecoveredToolFailures
+          .map((failure) => String(failure.error_message ?? 'unknown tool error'))
+          .join('; ');
+        throw new Error('MCP tool execution failed: ' + details);
+      }
+
+      if (!execution.findings.length) {
+        throw new Error(
+          'No MCP tool call completed successfully; inspect the tool-call error for the upstream cause',
+        );
+      }
+
       activePlanId = execution.plan.id;
       inputTokens += execution.usage.inputTokens;
       outputTokens += execution.usage.outputTokens;
@@ -202,18 +223,22 @@ export class ExecutionService {
           run,
           findings: execution.findings,
           draft: execution.draft,
+          completedToolNames: execution.findings
+            .map((finding) => finding.tool_name)
+            .filter((name): name is string => typeof name === 'string'),
         });
         inputTokens += response.usage.inputTokens;
         outputTokens += response.usage.outputTokens;
         await this.steps.complete(finalStep, response.json ?? { text: response.text }, response.usage);
 
         await this.database.transaction(async (client) => {
-          await client.query(
+          const completed = await client.query<{ id: string; status: string }>(
             `UPDATE agent_runs
              SET status = 'COMPLETED', final_response = $2, final_response_json = $3::jsonb,
                  input_tokens = $4, output_tokens = $5, total_tokens = $6,
                  iteration_count = $7, completed_at = NOW()
-             WHERE id = $1 AND status != 'CANCELLED'`,
+             WHERE id = $1 AND status != 'CANCELLED'
+             RETURNING id, status`,
             [
               run.id,
               response.text,
@@ -224,7 +249,21 @@ export class ExecutionService {
               execution.iterations,
             ],
           );
+
+          if (!completed.rowCount) {
+            throw new Error('Agent run was cancelled before the final response could be stored');
+          }
+
           await client.query('UPDATE agents SET last_run_at = NOW() WHERE id = $1', [agent.id]);
+        });
+
+        this.logger.log('Agent run completed', {
+          runId: run.id,
+          status: 'COMPLETED',
+          responseLength: response.text.length,
+          hasJsonResponse: Boolean(response.json),
+          inputTokens,
+          outputTokens,
         });
 
         await this.plans.recordSuccess(execution.plan.id);
@@ -248,6 +287,24 @@ export class ExecutionService {
       if (activePlanId) {
         await this.plans.recordFailure(activePlanId);
       }
+    }
+  }
+
+  private async authenticateMcpServers(
+    run: AgentRunRecord,
+    tools: Array<{ server_id: string }>,
+  ): Promise<void> {
+    const serverIds = [...new Set(tools.map((tool) => tool.server_id))];
+
+    for (const serverId of serverIds) {
+      const server = await this.registry.getServer(run.tenant_id, serverId);
+      await this.auth.getAccessToken(server);
+      this.logger.log('MCP authentication completed', {
+        runId: run.id,
+        tenantId: run.tenant_id,
+        serverId: server.id,
+        serverName: server.name,
+      });
     }
   }
 

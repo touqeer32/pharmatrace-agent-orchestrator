@@ -55,6 +55,7 @@ export class McpClientService {
       'Content-Type': 'application/json',
       Accept: 'application/json, text/event-stream',
       'MCP-Protocol-Version': '2025-03-26',
+      ...(server.tenant_id ? { 'x-tenant-id': server.tenant_id } : {}),
       ...(sessionId ? { 'Mcp-Session-Id': sessionId } : {}),
     };
 
@@ -67,11 +68,17 @@ export class McpClientService {
 
     if (response.status === 401 || response.status === 403) {
       this.auth.invalidate(server.id);
-      throw new BadGatewayException(`Authenticated MCP request was rejected with HTTP ${response.status}`);
+      const details = (await response.text()).slice(0, 500);
+      throw new BadGatewayException(
+        `Authenticated MCP request was rejected with HTTP ${response.status}${details ? `: ${details}` : ''}`,
+      );
     }
 
     if (!response.ok) {
-      throw new BadGatewayException(`Remote MCP server returned HTTP ${response.status}`);
+      const details = (await response.text()).slice(0, 1000);
+      throw new BadGatewayException(
+        `Remote MCP server returned HTTP ${response.status}${details ? `: ${details}` : ''}`,
+      );
     }
 
     const issuedSessionId = response.headers.get('mcp-session-id');
@@ -107,6 +114,7 @@ export class McpClientService {
         'Content-Type': 'application/json',
         Accept: 'application/json, text/event-stream',
         'MCP-Protocol-Version': '2025-03-26',
+        ...(server.tenant_id ? { 'x-tenant-id': server.tenant_id } : {}),
         ...(sessionId ? { 'Mcp-Session-Id': sessionId } : {}),
       },
       body: JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }),
@@ -114,7 +122,10 @@ export class McpClientService {
     });
 
     if (!response.ok) {
-      throw new BadGatewayException(`Remote MCP initialization notification returned HTTP ${response.status}`);
+      const details = (await response.text()).slice(0, 1000);
+      throw new BadGatewayException(
+        `Remote MCP initialization notification returned HTTP ${response.status}${details ? `: ${details}` : ''}`,
+      );
     }
   }
 

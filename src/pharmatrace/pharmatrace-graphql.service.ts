@@ -39,7 +39,13 @@ export class PharmaTraceGraphqlService {
 
     const requestVariables = tool.name === 'list_batch_lots'
       ? { pageInput: variables }
-      : variables;
+      : tool.name === 'get_batch_lot'
+        ? { id: variables.lotId }
+        : tool.name === 'get_product'
+          ? { id: variables.productId }
+          : tool.name === 'get_drug'
+            ? { id: variables.drugId }
+            : variables;
 
     if (process.env.DEBUG_GRAPHQL_REQUESTS === 'true') {
       this.logger.log('PharmaTrace GraphQL request', {
@@ -57,6 +63,7 @@ export class PharmaTraceGraphqlService {
       headers: {
         Authorization: `Bearer ${accessToken}`,
         ...(server.tenant_id ? { tenantid: server.tenant_id } : {}),
+        ...(server.tenant_id ? { 'x-tenant-id': server.tenant_id } : {}),
         'Content-Type': 'application/json',
         Accept: 'application/json',
       },

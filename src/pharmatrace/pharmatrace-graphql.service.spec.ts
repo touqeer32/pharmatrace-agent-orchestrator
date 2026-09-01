@@ -54,6 +54,38 @@ describe('PharmaTraceGraphqlService', () => {
     expect(order).toEqual(['keycloak-login', 'graphql-call']);
   });
 
+  it('sends the exact batch-lot operation, pagination variables, and tenant headers', async () => {
+    const auth = {
+      getAccessToken: jest.fn(async () => 'test-access-token'),
+      invalidate: jest.fn(),
+    } as unknown as KeycloakAuthService;
+    const listTool = {
+      id: 'tool-2',
+      name: 'list_batch_lots',
+      operation_name: 'getAllBatchLot',
+    } as McpToolRecord;
+    let requestBody: { query: string; variables: unknown } | undefined;
+
+    global.fetch = jest.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+      requestBody = JSON.parse(String(init?.body)) as typeof requestBody;
+      const headers = init?.headers as Record<string, string>;
+      expect(headers.Authorization).toBe('Bearer test-access-token');
+      expect(headers.tenantid).toBe('tenant-1');
+      expect(headers['x-tenant-id']).toBe('tenant-1');
+      return new Response(
+        JSON.stringify({ data: { getAllBatchLot: { data: [], page: { totalElements: 0 } } } }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      );
+    }) as typeof fetch;
+
+    const service = new PharmaTraceGraphqlService(auth, new PharmaTraceNormalizerService());
+    await service.execute(server, listTool, { page: 1, size: 20 });
+
+    expect(requestBody?.variables).toEqual({ pageInput: { page: 1, size: 20 } });
+    expect(requestBody?.query).toContain('query getAllBatchLot($pageInput: PageInput)');
+    expect(requestBody?.query).toContain('getAllBatchLot(page: $pageInput)');
+  });
+
   it('does not call GraphQL when Keycloak authentication fails', async () => {
     const auth = {
       getAccessToken: jest.fn(async () => {

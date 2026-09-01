@@ -14,9 +14,14 @@ import { McpToolRecord } from '../mcp/mcp.types';
 import { PharmaTraceGraphqlService } from '../pharmatrace/pharmatrace-graphql.service';
 import { AgentRunRecord } from './execution.types';
 import { RunStepService } from './run-step.service';
+import { Logger } from '@nestjs/common';
+import { redact, safeErrorMessage } from '../common/redact';
+import { LotAnchorService } from '../pharmatrace/lot-anchor.service';
 
 @Injectable()
 export class ToolExecutorService {
+  private readonly logger = new Logger(ToolExecutorService.name);
+
   constructor(
     private readonly database: DatabaseService,
     private readonly access: McpAccessService,
@@ -24,6 +29,7 @@ export class ToolExecutorService {
     private readonly remoteClient: McpClientService,
     private readonly pharmatrace: PharmaTraceGraphqlService,
     private readonly steps: RunStepService,
+    private readonly lotAnchor: LotAnchorService,
   ) {}
 
   buildTools(input: {
@@ -55,6 +61,30 @@ export class ToolExecutorService {
     const authorized = await this.access.requireTool(run.tenant_id, agent.id, candidate.name);
     this.validateArguments(authorized.input_schema, args);
 
+    // An empty result from the discovery tool is a valid no-op for the anchoring
+    // tool. Keep it out of the transaction path so the agent can finish with a
+    // clear "nothing to anchor" result instead of failing on an empty payload.
+    if (authorized.name === 'push_lots_to_hedera' &&
+      (!Array.isArray(args.lotIds) || args.lotIds.length === 0)) {
+      const result = {
+        status: 'COMPLETED',
+        operation: 'NOOP',
+        reason: 'No unconfirmed lots were returned by list_batch_lots',
+        totalRequested: 0,
+        lotsPushed: 0,
+        lotsSkipped: 0,
+        lotsFailed: 0,
+        results: [],
+      };
+      this.logger.warn('Skipping lot anchor with no lot IDs', {
+        runId: run.id,
+        tenantId: run.tenant_id,
+        tool: authorized.name,
+        receivedLotIdsType: Array.isArray(args.lotIds) ? 'array' : typeof args.lotIds,
+      });
+      return result;
+    }
+
     const reserved = await this.database.one<{ tool_call_count: number }>(
       `UPDATE agent_runs
        SET tool_call_count = tool_call_count + 1
@@ -82,13 +112,35 @@ export class ToolExecutorService {
 
     try {
       const result =
-        server.metadata.serverType === 'PHARMATRACE_GRAPHQL'
+        authorized.name === 'push_lots_to_hedera'
+          ? await this.lotAnchor.anchorLots(server, args.lotIds as string[])
+          : server.metadata.serverType === 'PHARMATRACE_GRAPHQL'
           ? await this.pharmatrace.execute(server, authorized, args)
           : await this.remoteClient.callTool(server, authorized.name, args);
+
+      if (process.env.DEBUG_MCP_TOOL_RESULTS === 'true') {
+        const redactedResult = redact(result);
+        const serialized = JSON.stringify(redactedResult) ?? 'null';
+        this.logger.log('MCP tool response', {
+          runId: run.id,
+          tenantId: run.tenant_id,
+          tool: authorized.name,
+          response: serialized.length > 20000
+            ? serialized.slice(0, 20000) + '...[truncated]'
+            : redactedResult,
+          responseLength: serialized.length,
+        });
+      }
 
       await this.steps.complete(stepId, result);
       return result;
     } catch (error) {
+      this.logger.error('MCP tool failed', {
+        runId: run.id,
+        tenantId: run.tenant_id,
+        tool: authorized.name,
+        error: safeErrorMessage(error),
+      });
       await this.steps.fail(stepId, error);
       throw error;
     }

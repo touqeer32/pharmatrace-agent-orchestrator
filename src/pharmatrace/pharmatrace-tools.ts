@@ -8,6 +8,23 @@ const uuidProperty = (description: string) => ({
 
 export const PHARMATRACE_TOOLS: McpToolDefinition[] = [
   {
+    name: 'push_lots_to_hedera',
+    description: 'Anchor the supplied unconfirmed lot IDs on Hedera Testnet and persist each confirmed transaction back to PharmaTrace. This is the only write tool and performs validation, fee payment, contract submission, Mirror Node lookup, and backend persistence as one operation.',
+    operationName: 'anchorUnconfirmedLots',
+    entityType: 'batch_lot',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        lotIds: { type: 'array', items: uuidProperty('Batch lot UUID.') },
+      },
+      required: ['lotIds'],
+      additionalProperties: false,
+    },
+    keywords: ['hedera', 'anchor', 'create lot', 'write', 'submit'],
+    capabilities: ['hedera_write', 'lot_anchor'],
+    relatedToolNames: ['list_batch_lots'],
+  },
+  {
     name: 'list_batch_lots',
     description: 'List pharmaceutical batch lots with pagination and optional status filtering.',
     operationName: 'getAllBatchLot',
@@ -175,8 +192,8 @@ export const DEFAULT_GRAPHQL_DOCUMENTS: Record<string, string> = {
     }
   `,
   get_batch_lot: `
-    query GetBatchLot($lotId: String!) {
-      getBatchLotById(lotId: $lotId)
+    query GetBatchLot($id: String!) {
+      getBatchLotById(id: $id)
     }
   `,
   get_lot_items: `
@@ -191,19 +208,26 @@ export const DEFAULT_GRAPHQL_DOCUMENTS: Record<string, string> = {
     }
   `,
   get_product: `
-    query GetProduct($productId: String!) {
-      getProductById(productId: $productId) {
-        productId
-        productName
+    query GetProduct($id: String!) {
+      getProductById(id: $id) {
+        id
+        identifier
+        name
+        description
+        regulatoryCompliance
+        productData
         drugId
       }
     }
   `,
   get_drug: `
-    query GetDrug($drugId: String!) {
-      getDrugById(drugId: $drugId) {
-        drugId
+    query GetDrug($id: String!) {
+      getDrugById(id: $id) {
+        id
         name
+        description
+        drugIdentifiers
+        drugData
       }
     }
   `,

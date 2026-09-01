@@ -51,10 +51,13 @@ export class PlannerService {
         'Return only a JSON object matching this exact shape:',
         '{"objective":"...","steps":[{"id":"step-1","tool":"list_batch_lots","operation":"getAllBatchLot","arguments":{"page":1,"size":20}}],"completionCriteria":[]}',
         'Each step must use an actual tool name from availableTools. Never output placeholders or invented bulk operations.',
+        'For lot anchoring, call list_batch_lots first, select only lots not confirmed on Hedera, then call push_lots_to_hedera with the selected lotIds. Never call the write tool before the list result. If no lots qualify, do not call the write tool.',
         'When related data is needed, include multiple steps using the actual authorized tools. Repeat calls for returned IDs during execution; do not invent tools such as getAllLotItemsGivenLotIds.',
         'Respect maxToolCalls and maxIterations from executionLimits. If maxToolCalls is 1, return only one tool step.',
         'Select only authorized tool names from availableTools.',
         'Use {{input.field}} and {{previous_step.results}} parameter templates where useful.',
+        'Never wrap arguments as {"$": ...} or {"value": ...}; use literal values for current input parameters and {{...}} only for unresolved previous-step values.',
+        'Do not include optional arguments with null values unless the tool schema explicitly permits null.',
         'Include tool arguments that exactly match the JSON schemas.',
         'Never invent a tool, expose credentials, or cross tenant boundaries.',
       ].join('\n'),
@@ -91,7 +94,7 @@ export class PlannerService {
 
     try {
       parsed = planSchema.parse(
-        this.normalizePlannerShape(result.object as JsonObject, authorizedNames),
+        this.normalizePlannerShape(result.object as JsonObject, authorizedNames, input.inputParameters),
       );
     } catch {
       if (process.env.DEBUG_LLM_RESPONSES === 'true') {
@@ -109,6 +112,13 @@ export class PlannerService {
       }
     }
 
+    if (process.env.DEBUG_LLM_RESPONSES === 'true') {
+      this.logger.log('Normalized execution plan', {
+        inputParameters: input.inputParameters,
+        plan: parsed,
+      });
+    }
+
     if (!parsed.steps.some((step) => step.tool)) {
       throw new BadGatewayException('The execution plan must include at least one authorized MCP tool');
     }
@@ -120,7 +130,11 @@ export class PlannerService {
     };
   }
 
-  private normalizePlannerShape(raw: JsonObject, authorizedNames: Set<string>): JsonObject {
+  private normalizePlannerShape(
+    raw: JsonObject,
+    authorizedNames: Set<string>,
+    inputParameters: JsonObject,
+  ): JsonObject {
     if (!Array.isArray(raw.steps)) {
       return raw;
     }
@@ -145,10 +159,69 @@ export class PlannerService {
           id: typeof step.id === 'string' && step.id.trim() ? step.id : `step-${index + 1}`,
           ...(tool ? { tool } : {}),
           ...(typeof step.arguments === 'object' && step.arguments !== null
-            ? { arguments: step.arguments }
+            ? { arguments: this.normalizeArguments(step.arguments as JsonObject, inputParameters) }
             : {}),
         };
       }),
     };
+  }
+
+  /**
+   * Some local models wrap primitive planner arguments as { value: 1 }.
+   * Tool schemas require the primitive itself, so unwrap only that exact
+   * wrapper and preserve all other template/object arguments unchanged.
+   */
+  private normalizeArguments(argumentsValue: JsonObject, inputParameters: JsonObject): JsonObject {
+    const normalized: JsonObject = {};
+
+    for (const [name, value] of Object.entries(argumentsValue)) {
+      const resolved = this.normalizeArgumentValue(value, inputParameters);
+      if (resolved !== undefined) {
+        normalized[name] = resolved;
+      }
+    }
+
+    return normalized;
+  }
+
+  private normalizeArgumentValue(value: unknown, inputParameters: JsonObject): unknown {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) {
+      return value;
+    }
+
+    const object = value as JsonObject;
+    const keys = Object.keys(object);
+
+    if (keys.length === 1 && 'value' in object) {
+      return object.value;
+    }
+
+    if (keys.length === 1 && '$' in object && typeof object.$ === 'string') {
+      if (object.$ === 'null') {
+        return undefined;
+      }
+
+      const prefix = 'inputParameters.';
+      if (object.$.startsWith(prefix)) {
+        return this.readPath(inputParameters, object.$.slice(prefix.length));
+      }
+
+      return `{{${object.$}}}`;
+    }
+
+    return Object.fromEntries(
+      Object.entries(object)
+        .map(([key, item]) => [key, this.normalizeArgumentValue(item, inputParameters)])
+        .filter(([, item]) => item !== undefined),
+    );
+  }
+
+  private readPath(value: unknown, path: string): unknown {
+    return path.split('.').reduce<unknown>((current, key) => {
+      if (!current || typeof current !== 'object') {
+        return undefined;
+      }
+      return (current as Record<string, unknown>)[key];
+    }, value);
   }
 }

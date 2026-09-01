@@ -89,7 +89,9 @@ export class ExecutionLoopService {
           'You must call at least one authorized MCP tool before writing any response.',
           'Call authorized MCP tools to obtain every fact needed for the expected output.',
           'Follow the execution plan and adapt arguments to the current query and input.',
+          'Use the exact page and size values from inputParameters for list_batch_lots. Do not retry the same tool with wrapper objects such as {"$": ...} or {"value": ...}.',
           'Do not call get_drug when drugId is null, empty, or the literal string null.',
+          'For lot anchoring, do not call push_lots_to_hedera when list_batch_lots returns no qualifying lot IDs.',
           'Never invent records, reveal credentials, or use unauthorized tools.',
         ].join('\n'),
         prompt: JSON.stringify({
@@ -106,14 +108,26 @@ export class ExecutionLoopService {
         abortSignal: AbortSignal.timeout(input.agent.execution_timeout_seconds * 1000),
       });
 
+      const executedToolCalls = execution.steps.flatMap((step) => step.toolCalls ?? []);
+      const executedToolResults = execution.steps.flatMap((step) => step.toolResults ?? []);
+
       if (process.env.DEBUG_LLM_RESPONSES === 'true') {
         this.logger.log('LLM execution response', {
           runId: input.run.id,
           iteration: iterations,
           response: execution.text,
           responseLength: execution.text.length,
-          toolCallCount: current.tool_call_count,
+          reservedToolCallCount: current.tool_call_count,
+          executedToolCallCount: executedToolCalls.length,
+          executedTools: executedToolCalls.map((call) => call.toolName),
+          toolResultCount: executedToolResults.length,
         });
+      }
+
+      if (executedToolCalls.length === 0) {
+        throw new Error(
+          'The execution model returned text without executing an authorized MCP tool',
+        );
       }
 
       draft = execution.text;
