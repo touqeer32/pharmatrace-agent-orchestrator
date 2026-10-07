@@ -5,6 +5,7 @@ import { AgentRecord } from '../agents/agent.types';
 import { JsonObject } from '../common/json';
 import { McpToolRecord } from '../mcp/mcp.types';
 import { PlannerOutput } from './planner.types';
+import { appendModelTrace } from '../common/model-trace';
 
 const planSchema = z.object({
   objective: z.string().min(1),
@@ -36,50 +37,80 @@ export class PlannerService {
   async generate(input: {
     model: LanguageModel;
     agent: AgentRecord;
+    traceRunId?: string;
     userQuery: string | null;
     inputParameters: JsonObject;
     availableTools: McpToolRecord[];
     previousResults?: unknown;
   }): Promise<GeneratedPlan> {
+    // Compliance profile runs have one authorized orchestration tool. The
+    // backend already owns its schema and input values, so do not ask an LLM
+    // to invent a plan or rewrite arguments for this path.
+    if (input.availableTools.length === 1 && /^run_(serial|sscc|gdti)_profile_compliance$/.test(input.availableTools[0].name)) {
+      const tool = input.availableTools[0];
+      const allowed = new Set(Object.keys((tool.input_schema as any)?.properties ?? {}));
+      const argumentsValue = Object.fromEntries(
+        Object.entries(input.inputParameters).filter(([key]) => allowed.size === 0 || allowed.has(key)),
+      );
+      const plan: PlannerOutput = {
+        objective: input.userQuery || `Run ${tool.name}`,
+        steps: [{ id: 'step-1', tool: tool.name, operation: tool.name, arguments: argumentsValue }],
+        completionCriteria: ['The authorized compliance tool completed and returned a deterministic report context.'],
+      } as PlannerOutput;
+      await appendModelTrace(input.traceRunId ?? input.agent.id, {
+        stage: 'PLANNER_DETERMINISTIC',
+        request: { inputParameters: input.inputParameters, tool: tool.name },
+        response: plan,
+      });
+      return { plan, inputTokens: 0, outputTokens: 0 };
+    }
+    const system = [
+      'You are a backend execution planner for pharmaceutical traceability.',
+      'Use English for all objective, operation, condition, and completion text.',
+      'Return only a JSON object matching this exact shape:',
+      '{"objective":"...","steps":[{"id":"step-1","tool":"list_batch_lots","operation":"getAllBatchLot","arguments":{"page":1,"size":20}}],"completionCriteria":[]}',
+      'Each step must use an actual tool name from availableTools. Never output placeholders or invented bulk operations.',
+      'For lot anchoring, call list_batch_lots first, select only lots not confirmed on Hedera, then call push_lots_to_hedera with the selected lotIds. Never call the write tool before the list result. If no lots qualify, do not call the write tool.',
+      'When related data is needed, include multiple steps using the actual authorized tools. Repeat calls for returned IDs during execution; do not invent tools such as getAllLotItemsGivenLotIds.',
+      'Respect maxToolCalls and maxIterations from executionLimits. If maxToolCalls is 1, return only one tool step.',
+      'Select only authorized tool names from availableTools.',
+      'Use {{input.field}} and {{previous_step.results}} parameter templates where useful.',
+      'Never wrap arguments as {"$": ...} or {"value": ...}; use literal values for current input parameters and {{...}} only for unresolved previous-step values.',
+      'Do not include optional arguments with null values unless the tool schema explicitly permits null.',
+      'Include tool arguments that exactly match the JSON schemas.',
+      'Never invent a tool, expose credentials, or cross tenant boundaries.',
+    ].join('\n');
+    const prompt = JSON.stringify({
+      agentName: input.agent.name,
+      description: input.agent.description,
+      expectedOutput: input.agent.expected_output,
+      userQuery: input.userQuery,
+      inputParameters: input.inputParameters,
+      executionLimits: {
+        maxIterations: input.agent.max_iterations,
+        maxToolCalls: input.agent.max_tool_calls,
+      },
+      previousResults: input.previousResults ?? null,
+      availableTools: input.availableTools.map((tool) => ({
+        name: tool.name,
+        description: tool.description,
+        inputSchema: tool.input_schema,
+        capabilities: tool.capabilities,
+        relatedTools: tool.related_tool_names,
+      })),
+    });
     const result = await generateObject({
       model: input.model,
       // Avoid deep generic expansion in the AI SDK for this recursive-looking Zod shape.
       schema: planSchema as any,
-      system: [
-        'You are a backend execution planner for pharmaceutical traceability.',
-        'Use English for all objective, operation, condition, and completion text.',
-        'Return only a JSON object matching this exact shape:',
-        '{"objective":"...","steps":[{"id":"step-1","tool":"list_batch_lots","operation":"getAllBatchLot","arguments":{"page":1,"size":20}}],"completionCriteria":[]}',
-        'Each step must use an actual tool name from availableTools. Never output placeholders or invented bulk operations.',
-        'For lot anchoring, call list_batch_lots first, select only lots not confirmed on Hedera, then call push_lots_to_hedera with the selected lotIds. Never call the write tool before the list result. If no lots qualify, do not call the write tool.',
-        'When related data is needed, include multiple steps using the actual authorized tools. Repeat calls for returned IDs during execution; do not invent tools such as getAllLotItemsGivenLotIds.',
-        'Respect maxToolCalls and maxIterations from executionLimits. If maxToolCalls is 1, return only one tool step.',
-        'Select only authorized tool names from availableTools.',
-        'Use {{input.field}} and {{previous_step.results}} parameter templates where useful.',
-        'Never wrap arguments as {"$": ...} or {"value": ...}; use literal values for current input parameters and {{...}} only for unresolved previous-step values.',
-        'Do not include optional arguments with null values unless the tool schema explicitly permits null.',
-        'Include tool arguments that exactly match the JSON schemas.',
-        'Never invent a tool, expose credentials, or cross tenant boundaries.',
-      ].join('\n'),
-      prompt: JSON.stringify({
-        agentName: input.agent.name,
-        description: input.agent.description,
-        expectedOutput: input.agent.expected_output,
-        userQuery: input.userQuery,
-        inputParameters: input.inputParameters,
-        executionLimits: {
-          maxIterations: input.agent.max_iterations,
-          maxToolCalls: input.agent.max_tool_calls,
-        },
-        previousResults: input.previousResults ?? null,
-        availableTools: input.availableTools.map((tool) => ({
-          name: tool.name,
-          description: tool.description,
-          inputSchema: tool.input_schema,
-          capabilities: tool.capabilities,
-          relatedTools: tool.related_tool_names,
-        })),
-      }),
+      system,
+      prompt,
+    });
+    await appendModelTrace(input.traceRunId ?? input.agent.id, {
+      stage: 'PLANNER',
+      request: { system, prompt, schema: 'plannerSchema' },
+      response: result.object,
+      usage: result.usage,
     });
 
     if (process.env.DEBUG_LLM_RESPONSES === 'true') {
@@ -175,7 +206,10 @@ export class PlannerService {
     const normalized: JsonObject = {};
 
     for (const [name, value] of Object.entries(argumentsValue)) {
-      const resolved = this.normalizeArgumentValue(value, inputParameters);
+      const resolved = value && typeof value === 'object' && !Array.isArray(value)
+        && Object.keys(value as object).length === 0 && name in inputParameters
+        ? inputParameters[name]
+        : this.normalizeArgumentValue(value, inputParameters);
       if (resolved !== undefined) {
         normalized[name] = resolved;
       }

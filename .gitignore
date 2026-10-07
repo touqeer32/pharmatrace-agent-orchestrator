@@ -1,9 +1,9 @@
+values-production.yaml
+*.secret.yaml
+.env
 node_modules/
 dist/
-.env
-.secrets/
-coverage/
-*.tsbuildinfo
-npm-debug.log*
-
-README-Dev.md
+logs/model-traces/
+helm/pharmatrace-agent-orchestrator/production-secret-keys.txt
+values-production.yaml
+.env.local

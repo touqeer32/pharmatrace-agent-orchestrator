@@ -121,6 +121,44 @@ export const PHARMATRACE_TOOLS: McpToolDefinition[] = [
   },
 ];
 
+export const PROFILE_COMPLIANCE_TOOLS: McpToolDefinition[] = [
+  {
+    name: 'run_recall_pattern_compliance',
+    description: 'Authenticate with Keycloak, fetch real product recall requests, group repeated recall patterns by product and drug, create one deduplicated compliance report per pattern, and submit agent-created reports to HCS.',
+    operationName: 'runRecallPatternCompliance', entityType: 'recall_pattern',
+    inputSchema: { type: 'object', properties: { limit: { type: 'integer', minimum: 1, maximum: 500 }, minEvents: { type: 'integer', minimum: 2, maximum: 100 }, windowDays: { type: 'integer', minimum: 1, maximum: 3650 }, resetReports: { type: 'boolean', description: 'Test-only: remove existing pattern reports before processing.' } }, additionalProperties: false },
+    keywords: ['recall', 'pattern', 'product', 'drug', 'compliance', 'report'], capabilities: ['recall_read', 'pattern_analysis', 'compliance_report', 'hedera_write'], relatedToolNames: [],
+  },
+  {
+    name: 'run_shortage_pattern_compliance',
+    description: 'Authenticate with Keycloak, fetch real product shortages, group repeated shortage patterns by product and drug, create one deduplicated compliance report per pattern, and submit agent-created reports to HCS.',
+    operationName: 'runShortagePatternCompliance', entityType: 'shortage_pattern',
+    inputSchema: { type: 'object', properties: { limit: { type: 'integer', minimum: 1, maximum: 500 }, minEvents: { type: 'integer', minimum: 2, maximum: 100 }, windowDays: { type: 'integer', minimum: 1, maximum: 3650 }, resetReports: { type: 'boolean', description: 'Test-only: remove existing pattern reports before processing.' } }, additionalProperties: false },
+    keywords: ['shortage', 'pattern', 'product', 'drug', 'compliance', 'report'], capabilities: ['shortage_read', 'pattern_analysis', 'compliance_report', 'hedera_write'], relatedToolNames: [],
+  },
+  {
+    name: 'run_serial_profile_compliance',
+    description: 'Authenticate with Keycloak, fetch real serial-number profiles, validate them, generate optional test numbers, create compliance reports, and submit each agent-created report to HCS.',
+    operationName: 'runSerialProfileCompliance', entityType: 'serial_profile',
+    inputSchema: { type: 'object', properties: { limit: { type: 'integer', minimum: 1, maximum: 100 }, generateDemoNumbers: { type: 'boolean' }, demoNumberCount: { type: 'integer', minimum: 1, maximum: 10 }, resetReports: { type: 'boolean', description: 'Test-only: remove existing reports for fetched profiles before processing.' } }, additionalProperties: false },
+    keywords: ['serial', 'profile', 'GS1', 'compliance', 'report'], capabilities: ['profile_read', 'compliance_report', 'hedera_write'], relatedToolNames: [],
+  },
+  {
+    name: 'run_sscc_profile_compliance',
+    description: 'Authenticate with Keycloak, fetch real SSCC profiles, validate them, generate optional test numbers, create compliance reports, and submit each agent-created report to HCS.',
+    operationName: 'runSsccProfileCompliance', entityType: 'sscc_profile',
+    inputSchema: { type: 'object', properties: { limit: { type: 'integer', minimum: 1, maximum: 100 }, generateDemoNumbers: { type: 'boolean' }, demoNumberCount: { type: 'integer', minimum: 1, maximum: 10 }, resetReports: { type: 'boolean', description: 'Test-only: remove existing reports for fetched profiles before processing.' } }, additionalProperties: false },
+    keywords: ['SSCC', 'profile', 'GS1', 'compliance', 'report'], capabilities: ['profile_read', 'compliance_report', 'hedera_write'], relatedToolNames: [],
+  },
+  {
+    name: 'run_gdti_profile_compliance',
+    description: 'Authenticate with Keycloak, fetch real GDTI profiles, validate them, generate optional test numbers, create compliance reports, and submit each agent-created report to HCS.',
+    operationName: 'runGdtiProfileCompliance', entityType: 'gdti_profile',
+    inputSchema: { type: 'object', properties: { limit: { type: 'integer', minimum: 1, maximum: 100 }, generateDemoNumbers: { type: 'boolean' }, demoNumberCount: { type: 'integer', minimum: 1, maximum: 10 }, resetReports: { type: 'boolean', description: 'Test-only: remove existing reports for fetched profiles before processing.' } }, additionalProperties: false },
+    keywords: ['GDTI', 'profile', 'GS1', 'compliance', 'report'], capabilities: ['profile_read', 'compliance_report', 'hedera_write'], relatedToolNames: [],
+  },
+];
+
 // Actual upstream GraphQL schemas differ between PharmaTrace deployments.
 // Override any document through mcp_servers.metadata.graphqlDocuments[toolName].
 export const DEFAULT_GRAPHQL_DOCUMENTS: Record<string, string> = {

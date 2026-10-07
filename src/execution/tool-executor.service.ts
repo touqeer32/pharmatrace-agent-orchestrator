@@ -17,6 +17,9 @@ import { RunStepService } from './run-step.service';
 import { Logger } from '@nestjs/common';
 import { redact, safeErrorMessage } from '../common/redact';
 import { LotAnchorService } from '../pharmatrace/lot-anchor.service';
+import { ProfileComplianceMcpService } from '../mcp/profile-compliance-mcp.service';
+import { PROFILE_COMPLIANCE_SERVER_TYPE } from '../mcp/mcp.types';
+import { AgentAuditService } from './agent-audit.service';
 
 @Injectable()
 export class ToolExecutorService {
@@ -30,6 +33,8 @@ export class ToolExecutorService {
     private readonly pharmatrace: PharmaTraceGraphqlService,
     private readonly steps: RunStepService,
     private readonly lotAnchor: LotAnchorService,
+    private readonly profileCompliance: ProfileComplianceMcpService,
+    private readonly agentAudit: AgentAuditService,
   ) {}
 
   buildTools(input: {
@@ -100,6 +105,17 @@ export class ToolExecutorService {
     }
 
     const server = await this.registry.getServer(run.tenant_id, authorized.server_id);
+    await this.agentAudit.record({
+      tenantId: run.tenant_id,
+      workflowId: run.id,
+      actorId: agent.id,
+      actionType: 'MCP_TOOL_CALL_STARTED',
+      resourceType: 'MCP_TOOL',
+      resourceId: authorized.name,
+      status: 'STARTED',
+      description: `MCP tool started: ${authorized.name}`,
+      privateData: { toolName: authorized.name, serverId: server.id, input: args },
+    });
     const stepId = await this.steps.start({
       runId: run.id,
       iterationNumber: iteration,
@@ -116,6 +132,8 @@ export class ToolExecutorService {
           ? await this.lotAnchor.anchorLots(server, args.lotIds as string[])
           : server.metadata.serverType === 'PHARMATRACE_GRAPHQL'
           ? await this.pharmatrace.execute(server, authorized, args)
+          : server.metadata.serverType === PROFILE_COMPLIANCE_SERVER_TYPE
+          ? await this.profileCompliance.run(authorized.name, { tenantId: run.tenant_id, userId: run.triggered_by ?? agent.created_by }, args)
           : await this.remoteClient.callTool(server, authorized.name, args);
 
       if (process.env.DEBUG_MCP_TOOL_RESULTS === 'true') {
@@ -133,6 +151,17 @@ export class ToolExecutorService {
       }
 
       await this.steps.complete(stepId, result);
+      await this.agentAudit.record({
+        tenantId: run.tenant_id,
+        workflowId: run.id,
+        actorId: agent.id,
+        actionType: 'MCP_TOOL_CALL_COMPLETED',
+        resourceType: 'MCP_TOOL',
+        resourceId: authorized.name,
+        status: 'COMPLETED',
+        description: `MCP tool completed: ${authorized.name}`,
+        privateData: { toolName: authorized.name, serverId: server.id },
+      });
       return result;
     } catch (error) {
       this.logger.error('MCP tool failed', {
@@ -140,6 +169,17 @@ export class ToolExecutorService {
         tenantId: run.tenant_id,
         tool: authorized.name,
         error: safeErrorMessage(error),
+      });
+      await this.agentAudit.record({
+        tenantId: run.tenant_id,
+        workflowId: run.id,
+        actorId: agent.id,
+        actionType: 'MCP_TOOL_CALL_FAILED',
+        resourceType: 'MCP_TOOL',
+        resourceId: authorized.name,
+        status: 'FAILED',
+        description: `MCP tool failed: ${authorized.name}`,
+        privateData: { toolName: authorized.name, serverId: server.id, error: safeErrorMessage(error) },
       });
       await this.steps.fail(stepId, error);
       throw error;

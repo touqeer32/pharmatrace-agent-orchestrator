@@ -13,6 +13,8 @@ import { PharmaTraceGraphqlService } from '../pharmatrace/pharmatrace-graphql.se
 import { JsonRpcDto } from './dto/mcp.dto';
 import { McpClientService } from './mcp-client.service';
 import { McpRegistryService } from './mcp-registry.service';
+import { ProfileComplianceMcpService } from './profile-compliance-mcp.service';
+import { PROFILE_COMPLIANCE_SERVER_TYPE } from './mcp.types';
 
 @Controller('mcp/servers/:serverId')
 export class PharmaTraceMcpController {
@@ -20,6 +22,7 @@ export class PharmaTraceMcpController {
     private readonly registry: McpRegistryService,
     private readonly pharmatrace: PharmaTraceGraphqlService,
     private readonly remoteClient: McpClientService,
+    private readonly profileCompliance: ProfileComplianceMcpService,
   ) {}
 
   @Post('rpc')
@@ -72,6 +75,8 @@ export class PharmaTraceMcpController {
       const value =
         server.metadata.serverType === 'PHARMATRACE_GRAPHQL'
           ? await this.pharmatrace.execute(server, selected, args)
+          : server.metadata.serverType === PROFILE_COMPLIANCE_SERVER_TYPE
+            ? await this.profileCompliance.run(selected.name, tenant, args)
           : await this.remoteClient.callTool(server, selected.name, args);
 
       result = {

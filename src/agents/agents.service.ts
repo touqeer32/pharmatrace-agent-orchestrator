@@ -93,16 +93,63 @@ export class AgentsService {
         'SELECT mcp_server_id FROM agent_allowed_mcp_servers WHERE agent_id = $1',
         [agentId],
       ),
-      this.database.query<{ mcp_tool_id: string }>(
-        'SELECT mcp_tool_id FROM agent_allowed_mcp_tools WHERE agent_id = $1',
+      this.database.query<any>(
+        `SELECT t.id, t.server_id, t.name, t.description, t.domain,
+                t.entity_type, t.operation_name, t.input_schema,
+                t.output_schema, t.keywords, t.capabilities,
+                t.related_tool_names, t.metadata, t.enabled,
+                s.name AS server_name, s.description AS server_description,
+                s.transport AS server_transport, s.endpoint AS server_endpoint,
+                s.metadata AS server_metadata, s.enabled AS server_enabled
+         FROM agent_allowed_mcp_tools a
+         JOIN mcp_tools t ON t.id = a.mcp_tool_id
+         JOIN mcp_servers s ON s.id = t.server_id
+         WHERE a.agent_id = $1
+         ORDER BY t.name`,
         [agentId],
       ),
     ]);
 
+    const allowedServers = await this.database.query<any>(
+      `SELECT s.id, s.name, s.description, s.transport, s.endpoint,
+              s.metadata, s.enabled
+       FROM agent_allowed_mcp_servers a
+       JOIN mcp_servers s ON s.id = a.mcp_server_id
+       WHERE a.agent_id = $1
+       ORDER BY s.name`,
+      [agentId],
+    );
+
     return {
       ...agent,
       allowed_mcp_server_ids: servers.rows.map((row) => row.mcp_server_id),
-      allowed_mcp_tool_ids: tools.rows.map((row) => row.mcp_tool_id),
+      allowed_mcp_tool_ids: tools.rows.map((row) => row.id),
+      allowed_mcp_servers: allowedServers.rows,
+      allowed_mcp_tools: tools.rows.map((row) => ({
+        id: row.id,
+        server_id: row.server_id,
+        name: row.name,
+        description: row.description,
+        domain: row.domain,
+        entity_type: row.entity_type,
+        operation_name: row.operation_name,
+        input_schema: row.input_schema,
+        output_schema: row.output_schema,
+        keywords: row.keywords,
+        capabilities: row.capabilities,
+        related_tool_names: row.related_tool_names,
+        metadata: row.metadata,
+        enabled: row.enabled,
+        server: {
+          id: row.server_id,
+          name: row.server_name,
+          description: row.server_description,
+          transport: row.server_transport,
+          endpoint: row.server_endpoint,
+          metadata: row.server_metadata,
+          enabled: row.server_enabled,
+        },
+      })),
     };
   }
 

@@ -21,6 +21,8 @@ import { ExecutionLoopService } from './execution-loop.service';
 import { AgentRunRecord } from './execution.types';
 import { ResponseGeneratorService } from './response-generator.service';
 import { RunStepService } from './run-step.service';
+import { ComplianceService } from '../compliance/compliance.service';
+import { AgentAuditService } from './agent-audit.service';
 
 @Injectable()
 export class ExecutionService {
@@ -39,6 +41,8 @@ export class ExecutionService {
     private readonly steps: RunStepService,
     private readonly loop: ExecutionLoopService,
     private readonly responses: ResponseGeneratorService,
+    private readonly compliance: ComplianceService,
+    private readonly agentAudit: AgentAuditService,
   ) {}
 
   async enqueue(
@@ -103,6 +107,17 @@ export class ExecutionService {
 
     try {
       const agent = await this.agents.get(run.tenant_id, run.agent_id);
+      await this.agentAudit.record({
+        tenantId: run.tenant_id,
+        workflowId: run.id,
+        actorId: agent.id,
+        actionType: 'AGENT_RUN_STARTED',
+        resourceType: 'AGENT_RUN',
+        resourceId: run.id,
+        status: 'STARTED',
+        description: `Agent run started: ${agent.name}`,
+        privateData: { agentName: agent.name, triggeredBy: run.triggered_by },
+      });
       const authorizedTools = await this.access.toolsForAgent(run.tenant_id, agent.id);
 
       if (!authorizedTools.length) {
@@ -118,6 +133,24 @@ export class ExecutionService {
       }
 
       const model = await this.models.create(connection, run.llm_model_snapshot);
+      const configuredTimeoutSeconds = agent.execution_timeout_seconds;
+      const isNvidiaEndpoint =
+        connection.provider === 'OPENAI' &&
+        (connection.base_url ?? '').toLowerCase().includes('integrate.api.nvidia.com');
+      const nvidiaTimeoutSeconds = Number(
+        process.env.NVIDIA_EXECUTION_TIMEOUT_SECONDS ?? 1200,
+      );
+      const executionTimeoutSeconds = isNvidiaEndpoint
+        ? Math.max(configuredTimeoutSeconds, nvidiaTimeoutSeconds)
+        : configuredTimeoutSeconds;
+
+      this.logger.log('Agent execution timeout selected', {
+        runId: run.id,
+        provider: connection.provider,
+        baseUrl: connection.base_url,
+        configuredTimeoutSeconds,
+        executionTimeoutSeconds,
+      });
       let inputTokens = 0;
       let outputTokens = 0;
       let plan = !run.force_replan ? await this.plans.getReusable(agent, authorizedTools) : null;
@@ -142,9 +175,10 @@ export class ExecutionService {
         });
 
         try {
-          const generated = await this.planner.generate({
-            model,
-            agent,
+        const generated = await this.planner.generate({
+          model,
+          agent,
+          traceRunId: run.id,
             userQuery: run.user_query,
             inputParameters: run.input_parameters,
             availableTools: authorizedTools,
@@ -180,6 +214,7 @@ export class ExecutionService {
         run,
         plan,
         authorizedTools,
+        executionTimeoutSeconds,
       });
 
       const unrecoveredToolFailures = await this.steps.unrecoveredToolFailures(run.id);
@@ -217,19 +252,41 @@ export class ExecutionService {
       });
 
       try {
-        const response = await this.responses.generate({
+        const runCounters = await this.database.one<{ tool_call_count: number }>(
+          'SELECT tool_call_count FROM agent_runs WHERE id = $1',
+          [run.id],
+        );
+        const response = await this.responses.reviewProfileGroups({
           model,
           agent,
           run,
           findings: execution.findings,
-          draft: execution.draft,
-          completedToolNames: execution.findings
-            .map((finding) => finding.tool_name)
-            .filter((name): name is string => typeof name === 'string'),
-        });
+          toolCallsUsed: Number(runCounters?.tool_call_count ?? execution.findings.length),
+        }) ?? await this.responses.generate({
+            model,
+            agent,
+            run,
+            findings: execution.findings,
+            draft: execution.draft,
+            completedToolNames: execution.findings
+              .map((finding) => finding.tool_name)
+              .filter((name): name is string => typeof name === 'string'),
+          });
         inputTokens += response.usage.inputTokens;
         outputTokens += response.usage.outputTokens;
         await this.steps.complete(finalStep, response.json ?? { text: response.text }, response.usage);
+
+        if (response.json?.profiles && Array.isArray(response.json.profiles)) {
+          const persistedReviews = await this.compliance.persistAgentProfileReview({
+            tenantId: run.tenant_id,
+            agentId: agent.id,
+            agentName: agent.name,
+            response: response.json,
+          });
+          response.json.processingStatus = 'COMPLETED';
+          response.json.summary = `Validated ${persistedReviews.length} profile review report(s). Deterministic evidence and remediation metadata were preserved by the backend.`;
+          response.text = JSON.stringify(response.json);
+        }
 
         await this.database.transaction(async (client) => {
           const completed = await client.query<{ id: string; status: string }>(
@@ -266,6 +323,18 @@ export class ExecutionService {
           outputTokens,
         });
 
+        await this.agentAudit.record({
+          tenantId: run.tenant_id,
+          workflowId: run.id,
+          actorId: agent.id,
+          actionType: 'AGENT_RUN_COMPLETED',
+          resourceType: 'AGENT_RUN',
+          resourceId: run.id,
+          status: 'COMPLETED',
+          description: `Agent run completed: ${agent.name}`,
+          privateData: { responseLength: response.text.length },
+        });
+
         await this.plans.recordSuccess(execution.plan.id);
       } catch (error) {
         await this.steps.fail(finalStep, error);
@@ -274,6 +343,18 @@ export class ExecutionService {
     } catch (error) {
       const message = safeErrorMessage(error);
       this.logger.error(`Agent run ${run.id} failed: ${message}`);
+
+      await this.agentAudit.record({
+        tenantId: run.tenant_id,
+        workflowId: run.id,
+        actorId: run.agent_id,
+        actionType: 'AGENT_RUN_FAILED',
+        resourceType: 'AGENT_RUN',
+        resourceId: run.id,
+        status: 'FAILED',
+        description: `Agent run failed: ${message}`,
+        privateData: { error: message },
+      });
 
       await this.database.query(
         `UPDATE agent_runs

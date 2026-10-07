@@ -1,6 +1,7 @@
 import { BadGatewayException, BadRequestException, Injectable, Logger } from '@nestjs/common';
 import { Contract, JsonRpcProvider, Wallet } from 'ethers';
 import { JsonObject } from '../common/json';
+import { hederaNetwork, hederaRpcUrl, hederaSignerPrivateKey, mirrorNodeUrl, pharmatraceManagerAddress, pharmatraceMirrorNodeUrl } from '../common/hedera-config';
 import { McpServer } from '../mcp/mcp.types';
 import { KeycloakAuthService } from './keycloak-auth.service';
 
@@ -54,19 +55,19 @@ export class LotAnchorService {
           results: [],
         };
       }
-      const rpcUrl = this.required('HEDERA_RPC_URL');
-      const managerAddress = this.required('PHARMATRACE_MANAGER_ADDRESS');
+      const rpcUrl = hederaRpcUrl();
+      const managerAddress = pharmatraceManagerAddress();
       this.assertAddress(managerAddress, 'PHARMATRACE_MANAGER_ADDRESS');
       this.logger.log('Lot anchor configuration', {
-        network: process.env.HEDERA_NETWORK ?? 'testnet',
+        network: hederaNetwork(),
         rpcUrl,
         managerAddress,
         lotCount: lotIds.length,
-        signerConfigured: Boolean(process.env.HEDERA_SIGNER_PRIVATE_KEY),
+        signerConfigured: Boolean(hederaSignerPrivateKey()),
       });
 
       const provider = new JsonRpcProvider(rpcUrl);
-      const signer = new Wallet(this.required('HEDERA_SIGNER_PRIVATE_KEY'), provider);
+      const signer = new Wallet(hederaSignerPrivateKey(), provider);
       const manager = new Contract(managerAddress, MANAGER_ABI, signer);
       const walletAddress = await signer.getAddress();
       this.logger.log('Lot anchor wallet resolved', { walletAddress, managerAddress });
@@ -80,7 +81,7 @@ export class LotAnchorService {
       }
       return {
         status: 'COMPLETED',
-        network: process.env.HEDERA_NETWORK ?? 'testnet',
+        network: hederaNetwork(),
         walletAddress,
         totalRequested: lotIds.length,
         lotsPushed: results.filter((item) => item.status === 'CONFIRMED').length,
@@ -91,10 +92,10 @@ export class LotAnchorService {
     } catch (error) {
       this.logger.error('Lot anchor initialization failed', {
         error: error instanceof Error ? error.message : String(error),
-        network: process.env.HEDERA_NETWORK ?? 'testnet',
-        rpcUrl: process.env.HEDERA_RPC_URL ?? null,
-        managerAddress: process.env.PHARMATRACE_MANAGER_ADDRESS ?? null,
-        signerConfigured: Boolean(process.env.HEDERA_SIGNER_PRIVATE_KEY),
+        network: hederaNetwork(),
+        rpcUrl: (() => { try { return hederaRpcUrl(); } catch { return null; } })(),
+        managerAddress: (() => { try { return pharmatraceManagerAddress(); } catch { return null; } })(),
+        signerConfigured: Boolean(process.env.HEDERA_SIGNER_PRIVATE_KEY || process.env.HEDERA_SIGNER_PRIVATE_KEY_MAINNET || process.env.HEDERA_SIGNER_PRIVATE_KEY_TESTNET),
       });
       throw error;
     }
@@ -249,7 +250,7 @@ export class LotAnchorService {
   }
 
   private async getMirrorReceipt(txHash: string): Promise<JsonObject | null> {
-    const base = (process.env.PHARMATRACE_MIRROR_NODE_URL ?? process.env.MIRROR_NODE_URL ?? '').replace(/\/$/, '');
+    const base = pharmatraceMirrorNodeUrl();
     if (!base) return null;
     const response = await fetch(base + '/api/v1/contracts/results/' + encodeURIComponent(txHash));
     if (!response.ok) return null;

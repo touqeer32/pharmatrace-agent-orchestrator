@@ -5,10 +5,10 @@ import {
 } from '@nestjs/common';
 import { asJson, JsonObject } from '../common/json';
 import { DatabaseService } from '../database/database.service';
-import { PHARMATRACE_TOOLS } from '../pharmatrace/pharmatrace-tools';
+import { PHARMATRACE_TOOLS, PROFILE_COMPLIANCE_TOOLS } from '../pharmatrace/pharmatrace-tools';
 import { CreateMcpServerDto, UpdateMcpServerDto } from './dto/mcp.dto';
 import { McpClientService } from './mcp-client.service';
-import { McpServer, McpToolDefinition, McpToolRecord } from './mcp.types';
+import { McpServer, McpToolDefinition, McpToolRecord, PROFILE_COMPLIANCE_SERVER_TYPE } from './mcp.types';
 
 @Injectable()
 export class McpRegistryService {
@@ -111,6 +111,8 @@ export class McpRegistryService {
     const definitions =
       server.metadata.serverType === 'PHARMATRACE_GRAPHQL'
         ? PHARMATRACE_TOOLS
+        : server.metadata.serverType === PROFILE_COMPLIANCE_SERVER_TYPE
+          ? PROFILE_COMPLIANCE_TOOLS
         : this.normalizeRemoteDefinitions(await this.client.listTools(server));
 
     for (const definition of definitions) {

@@ -39,3 +39,5 @@ export interface McpToolDefinition {
   capabilities: string[];
   relatedToolNames: string[];
 }
+
+export const PROFILE_COMPLIANCE_SERVER_TYPE = 'PHARMATRACE_PROFILE_COMPLIANCE';

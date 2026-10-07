@@ -19,7 +19,24 @@ export function redact(value: unknown): unknown {
 }
 
 export function safeErrorMessage(error: unknown): string {
-  const message = error instanceof Error ? error.message : String(error);
+  let message: string;
+  if (error instanceof Error) {
+    message = error.message || error.stack || error.name;
+  } else if (typeof error === 'string') {
+    message = error;
+  } else {
+    try {
+      message = JSON.stringify(redact(error));
+    } catch {
+      message = String(error);
+    }
+  }
+
+  if (!message || message === '{}') {
+    const type = error === null ? 'null' : typeof error;
+    message = `Unknown error (${type})`;
+  }
+
   return message
     .replace(/Bearer\s+[^\s,;]+/gi, 'Bearer [REDACTED]')
     .replace(/\b(?:sk-ant-|sk-proj-|sk-)[A-Za-z0-9_-]+/g, '[REDACTED]')

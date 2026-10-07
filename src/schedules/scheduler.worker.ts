@@ -1,18 +1,19 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { BeforeApplicationShutdown, Injectable, Logger } from '@nestjs/common';
 import { Interval } from '@nestjs/schedule';
 import { safeErrorMessage } from '../common/redact';
 import { SchedulesService } from './schedules.service';
 
 @Injectable()
-export class SchedulerWorker {
+export class SchedulerWorker implements BeforeApplicationShutdown {
   private readonly logger = new Logger(SchedulerWorker.name);
   private polling = false;
+  private stopping = false;
 
   constructor(private readonly schedules: SchedulesService) {}
 
   @Interval(Number(process.env.SCHEDULER_POLL_INTERVAL_MS ?? 15_000))
   async poll(): Promise<void> {
-    if (this.polling) {
+    if (this.stopping || this.polling) {
       return;
     }
 
@@ -29,5 +30,9 @@ export class SchedulerWorker {
     } finally {
       this.polling = false;
     }
+  }
+
+  beforeApplicationShutdown(): void {
+    this.stopping = true;
   }
 }

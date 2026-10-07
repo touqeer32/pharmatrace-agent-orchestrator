@@ -41,7 +41,21 @@ export class LlmProviderFactory {
       ...(connection.project_id ? { project: connection.project_id } : {}),
     });
 
-    // Explicitly use OpenAI's recommended Responses API surface.
+    // NVIDIA's Integrate endpoint is OpenAI-compatible, but exposes
+    // /chat/completions rather than OpenAI's Responses API. Keep standard
+    // OpenAI on Responses, while routing NVIDIA (and an explicitly configured
+    // custom endpoint) through Chat Completions. This also keeps local Ollama
+    // behavior unchanged above.
+    const baseUrl = connection.base_url ?? '';
+    const usesChatCompletions =
+      process.env.OPENAI_USE_CHAT_COMPLETIONS === 'true' ||
+      baseUrl.includes('integrate.api.nvidia.com');
+    if (usesChatCompletions) {
+      return openai.chat(model);
+    }
+
+    // Explicitly use OpenAI's recommended Responses API surface for the
+    // official OpenAI endpoint.
     return openai.responses(model);
   }
 }

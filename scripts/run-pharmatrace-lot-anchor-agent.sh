@@ -11,9 +11,11 @@ MODEL="${MODEL:-qwen2.5:7b-instruct}"
 OLLAMA_BASE_URL="${OLLAMA_BASE_URL:-http://127.0.0.1:11434/v1}"
 PAGE="${PAGE:-1}"
 SIZE="${SIZE:-100}"
-MAX_ITERATIONS="${MAX_ITERATIONS:-2}"
+MAX_ITERATIONS="${MAX_ITERATIONS:-1}"
 MAX_TOOL_CALLS="${MAX_TOOL_CALLS:-2}"
-AGENT_NAME="${AGENT_NAME:-Manual PharmaTrace Hedera Lot Anchor Agent $(date +%Y%m%d-%H%M%S)}"
+EXECUTION_TIMEOUT_SECONDS="${EXECUTION_TIMEOUT_SECONDS:-1200}"
+FORCE_REPLAN="${FORCE_REPLAN:-false}"
+AGENT_NAME="${AGENT_NAME:-Manual PharmaTrace Hedera Lot Anchor Agent}"
 QUERY="${QUERY:-Find pharmaceutical lots that are not confirmed on Hedera, anchor them on Hedera Testnet, persist each successful anchor, and return a compact English summary. Use list_batch_lots first and push_lots_to_hedera second.}"
 
 headers=(
@@ -67,6 +69,7 @@ agent_payload=$(jq -n \
   --argjson toolIds "$tool_ids" \
   --argjson maxIterations "$MAX_ITERATIONS" \
   --argjson maxToolCalls "$MAX_TOOL_CALLS" \
+  --argjson executionTimeoutSeconds "$EXECUTION_TIMEOUT_SECONDS" \
   --argjson page "$PAGE" \
   --argjson size "$SIZE" \
   '{
@@ -79,19 +82,44 @@ agent_payload=$(jq -n \
     llmModel:$model,
     maxIterations:$maxIterations,
     maxToolCalls:$maxToolCalls,
+    executionTimeoutSeconds:$executionTimeoutSeconds,
     defaultInput:{page:$page,size:$size},
     allowedMcpServerIds:[$serverId],
     allowedMcpToolIds:$toolIds
   }')
 
-echo "Creating agent: $AGENT_NAME"
-agent_response=$(curl -fsS -X POST "$API/agents" "${headers[@]}" \
-  -H 'content-type: application/json' -d "$agent_payload")
-echo "$agent_response" | jq
-AGENT_ID=$(echo "$agent_response" | jq -er '.id')
+agent_id=""
+if [[ -n "${AGENT_ID:-}" ]]; then
+  candidate=$(curl -sS "$API/agents/$AGENT_ID" "${headers[@]}" || true)
+  if echo "$candidate" | jq -e '.id' >/dev/null 2>&1; then
+    agent_id="$AGENT_ID"
+    echo "Reusing agent by AGENT_ID: $agent_id"
+    curl -fsS -X PATCH "$API/agents/$agent_id" "${headers[@]}" \
+      -H 'content-type: application/json' -d "$agent_payload" >/dev/null
+  else
+    echo "AGENT_ID $AGENT_ID was not found; falling back to stable agent name '$AGENT_NAME'"
+  fi
+fi
+if [[ -z "$agent_id" ]]; then
+  agents=$(curl -fsS "$API/agents" "${headers[@]}")
+  agent_id=$(echo "$agents" | jq -r --arg name "$AGENT_NAME" '.[]? | select(.name == $name) | .id' | head -n 1)
+  if [[ -n "$agent_id" ]]; then
+    echo "Reusing agent '$AGENT_NAME': $agent_id"
+    curl -fsS -X PATCH "$API/agents/$agent_id" "${headers[@]}" \
+      -H 'content-type: application/json' -d "$agent_payload" >/dev/null
+  else
+    echo "Creating agent: $AGENT_NAME"
+    agent_response=$(curl -fsS -X POST "$API/agents" "${headers[@]}" \
+      -H 'content-type: application/json' -d "$agent_payload")
+    echo "$agent_response" | jq
+    agent_id=$(echo "$agent_response" | jq -er '.id')
+  fi
+fi
+AGENT_ID="$agent_id"
 
 run_payload=$(jq -n --arg query "$QUERY" --argjson page "$PAGE" --argjson size "$SIZE" \
-  '{query:$query,input:{page:$page,size:$size},forceReplan:true}')
+  --argjson forceReplan "$FORCE_REPLAN" \
+  '{query:$query,input:{page:$page,size:$size},forceReplan:$forceReplan}')
 
 echo "Starting agent run: $AGENT_ID"
 run_response=$(curl -fsS -X POST "$API/agents/$AGENT_ID/run" "${headers[@]}" \
@@ -117,4 +145,3 @@ echo "Final result:"
 echo "$run" | jq '{status, final_response, final_response_json, error_message, error_details}'
 echo "AGENT_ID=$AGENT_ID"
 echo "RUN_ID=$RUN_ID"
-

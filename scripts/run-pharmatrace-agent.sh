@@ -13,7 +13,7 @@ MAX_ITERATIONS="${MAX_ITERATIONS:-1}"
 MAX_TOOL_CALLS="${MAX_TOOL_CALLS:-1}"
 PAGE="${PAGE:-1}"
 SIZE="${SIZE:-20}"
-AGENT_NAME="${AGENT_NAME:-Manual PharmaTrace Ollama Agent $(date +%Y%m%d-%H%M%S)}"
+AGENT_NAME="${AGENT_NAME:-Manual PharmaTrace Ollama Agent}"
 QUERY="${QUERY:-Only list pharmaceutical lots. Do not call any other tools.}"
 
 headers=(
@@ -83,12 +83,25 @@ agent_payload=$(jq -n \
     allowedMcpToolIds: $toolIds
   }')
 
-echo "Creating agent: $AGENT_NAME"
-agent_response=$(curl -fsS -X POST "$API/agents" "${headers[@]}" \
-  -H 'content-type: application/json' \
-  -d "$agent_payload")
-echo "$agent_response" | jq
-AGENT_ID=$(echo "$agent_response" | jq -er '.id')
+if [[ -n "${AGENT_ID:-}" ]]; then
+  echo "Reusing agent by AGENT_ID: $AGENT_ID"
+  curl -fsS -X PATCH "$API/agents/$AGENT_ID" "${headers[@]}" \
+    -H 'content-type: application/json' -d "$agent_payload" >/dev/null
+else
+  agents=$(curl -fsS "$API/agents" "${headers[@]}")
+  AGENT_ID=$(echo "$agents" | jq -r --arg name "$AGENT_NAME" '.[]? | select(.name == $name) | .id' | head -n 1)
+  if [[ -n "$AGENT_ID" ]]; then
+    echo "Reusing agent '$AGENT_NAME': $AGENT_ID"
+    curl -fsS -X PATCH "$API/agents/$AGENT_ID" "${headers[@]}" \
+      -H 'content-type: application/json' -d "$agent_payload" >/dev/null
+  else
+    echo "Creating agent: $AGENT_NAME"
+    agent_response=$(curl -fsS -X POST "$API/agents" "${headers[@]}" \
+      -H 'content-type: application/json' -d "$agent_payload")
+    echo "$agent_response" | jq
+    AGENT_ID=$(echo "$agent_response" | jq -er '.id')
+  fi
+fi
 
 run_payload=$(jq -n \
   --arg query "$QUERY" \

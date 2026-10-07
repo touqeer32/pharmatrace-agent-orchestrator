@@ -160,6 +160,21 @@ because the stored connection references the backend environment.
 For a safe first test, use one iteration and one tool call. After that succeeds, increase the limits
 for multi-tool execution.
 
+## One-command lot anchoring run
+
+Use this script after the backend has been configured with the Testnet signer, manager contract, and
+Mirror Node settings. It verifies that the selected MCP server is the PharmaTrace GraphQL server,
+synchronizes tools, discovers the current IDs for `list_batch_lots` and `push_lots_to_hedera`, creates
+a manual Ollama agent, runs it, and prints the final pushed/skipped/failed lot results:
+
+```text
+scripts/run-pharmatrace-lot-anchor-agent.sh
+```
+
+Required values are `API`, `SERVICE_API_KEY`, and `SERVER_ID`. The backend runtime, not this script,
+must contain `HEDERA_SIGNER_PRIVATE_KEY`, `HEDERA_RPC_URL`, and `PHARMATRACE_MANAGER_ADDRESS`.
+Start with `SIZE=1` and `MAX_TOOL_CALLS=2`; increase them only after one lot succeeds.
+
 ## Normal execution flow
 
 1. Create or select an LLM connection.
@@ -278,3 +293,11 @@ Database migrations:
 ```text
 npm run migrate
 ```
+
+export API="http://localhost:3000/api/v1"
+export SERVICE_API_KEY="rE+0oauVWo7MfpZ9hvtHLwn0zGVpNMYQkCW3QdPnPys="
+export SERVER_ID="7a32537b-f586-4e76-a42a-d0e837d68d41"
+export OLLAMA_API_KEY="ollama"
+export SIZE=1
+
+./scripts/run-pharmatrace-lot-anchor-agent.sh

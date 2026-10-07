@@ -3,6 +3,7 @@ import { ConfigModule } from '@nestjs/config';
 import { APP_GUARD } from '@nestjs/core';
 import { ScheduleModule } from '@nestjs/schedule';
 import { AgentsModule } from './agents/agents.module';
+import { ComplianceModule } from './compliance/compliance.module';
 import { TenantGuard } from './common/tenant.guard';
 import { DatabaseModule } from './database/database.module';
 import { ExecutionModule } from './execution/execution.module';
@@ -22,6 +23,7 @@ import { SchedulesModule } from './schedules/schedules.module';
     PharmaTraceModule,
     McpModule,
     AgentsModule,
+    ComplianceModule,
     PlannerModule,
     ExecutionModule,
     SchedulesModule,
