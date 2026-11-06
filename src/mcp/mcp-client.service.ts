@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { JsonObject } from '../common/json';
 import { KeycloakAuthService } from '../pharmatrace/keycloak-auth.service';
 import { McpServer } from './mcp.types';
+import { AgentAuditService } from '../execution/agent-audit.service';
 
 interface JsonRpcResponse {
   result?: unknown;
@@ -13,7 +14,10 @@ interface JsonRpcResponse {
 export class McpClientService {
   private readonly sessions = new Map<string, string>();
 
-  constructor(private readonly auth: KeycloakAuthService) {}
+  constructor(
+    private readonly auth: KeycloakAuthService,
+    private readonly agentAudit: AgentAuditService,
+  ) {}
 
   async listTools(server: McpServer): Promise<JsonObject[]> {
     await this.request(server, 'initialize', {
@@ -29,17 +33,52 @@ export class McpClientService {
     return result.tools ?? [];
   }
 
-  async callTool(server: McpServer, name: string, args: JsonObject): Promise<unknown> {
-    const result = (await this.request(server, 'tools/call', {
-      name,
-      arguments: args,
-    })) as { content?: unknown[]; structuredContent?: unknown; isError?: boolean };
-
-    if (result.isError) {
-      throw new BadGatewayException(`Remote MCP tool ${name} returned an error`);
+  async callTool(
+    server: McpServer,
+    name: string,
+    args: JsonObject,
+    auditContext?: { tenantId: string; workflowId: string; actorId: string },
+  ): Promise<unknown> {
+    if (auditContext) {
+      await this.agentAudit.record({
+        tenantId: auditContext.tenantId, workflowId: auditContext.workflowId, actorId: auditContext.actorId,
+        actionType: 'UPSTREAM_MCP_CALL_STARTED', resourceType: 'MCP_API', resourceId: name,
+        status: 'STARTED', description: `Remote MCP ${name} started`,
+        privateData: { endpoint: server.endpoint, tool: name, arguments: args },
+      });
     }
 
-    return result.structuredContent ?? result.content ?? result;
+    try {
+      const result = (await this.request(server, 'tools/call', {
+        name,
+        arguments: args,
+      })) as { content?: unknown[]; structuredContent?: unknown; isError?: boolean };
+
+      if (result.isError) {
+        throw new BadGatewayException(`Remote MCP tool ${name} returned an error`);
+      }
+
+      const output = result.structuredContent ?? result.content ?? result;
+      if (auditContext) {
+        await this.agentAudit.record({
+          tenantId: auditContext.tenantId, workflowId: auditContext.workflowId, actorId: auditContext.actorId,
+          actionType: 'UPSTREAM_MCP_CALL_COMPLETED', resourceType: 'MCP_API', resourceId: name,
+          status: 'COMPLETED', description: `Remote MCP ${name} completed`,
+          privateData: { endpoint: server.endpoint, tool: name },
+        });
+      }
+      return output;
+    } catch (error) {
+      if (auditContext) {
+        await this.agentAudit.record({
+          tenantId: auditContext.tenantId, workflowId: auditContext.workflowId, actorId: auditContext.actorId,
+          actionType: 'UPSTREAM_MCP_CALL_FAILED', resourceType: 'MCP_API', resourceId: name,
+          status: 'FAILED', description: `Remote MCP ${name} failed`,
+          privateData: { endpoint: server.endpoint, tool: name, error: error instanceof Error ? error.message : String(error) },
+        });
+      }
+      throw error;
+    }
   }
 
   private async request(server: McpServer, method: string, params: JsonObject): Promise<unknown> {

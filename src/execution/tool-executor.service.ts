@@ -129,12 +129,25 @@ export class ToolExecutorService {
     try {
       const result =
         authorized.name === 'push_lots_to_hedera'
-          ? await this.lotAnchor.anchorLots(server, args.lotIds as string[])
+          ? await this.lotAnchor.anchorLots(server, args.lotIds as string[], {
+              userId: run.triggered_by ?? agent.created_by,
+              newStatus: typeof args.newStatus === 'string' ? args.newStatus : 'DELIVERY',
+              transactionCode: typeof args.transactionCode === 'string' ? args.transactionCode : '002',
+              organization: typeof args.organization === 'string' ? args.organization : undefined,
+            })
           : server.metadata.serverType === 'PHARMATRACE_GRAPHQL'
-          ? await this.pharmatrace.execute(server, authorized, args)
+          ? await this.pharmatrace.execute(server, authorized, args, {
+              tenantId: run.tenant_id,
+              workflowId: run.id,
+              actorId: agent.id,
+            })
           : server.metadata.serverType === PROFILE_COMPLIANCE_SERVER_TYPE
           ? await this.profileCompliance.run(authorized.name, { tenantId: run.tenant_id, userId: run.triggered_by ?? agent.created_by }, args)
-          : await this.remoteClient.callTool(server, authorized.name, args);
+          : await this.remoteClient.callTool(server, authorized.name, args, {
+              tenantId: run.tenant_id,
+              workflowId: run.id,
+              actorId: agent.id,
+            });
 
       if (process.env.DEBUG_MCP_TOOL_RESULTS === 'true') {
         const redactedResult = redact(result);

@@ -6,4 +6,3 @@ dist/
 logs/model-traces/
 helm/pharmatrace-agent-orchestrator/production-secret-keys.txt
 values-production.yaml
-.env.local

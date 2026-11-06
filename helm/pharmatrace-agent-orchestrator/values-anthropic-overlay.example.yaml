@@ -1,0 +1,18 @@
+# Merge this overlay after your private values-production.yaml:
+#   -f values-production.yaml -f values-anthropic-overlay.yaml
+# Copy this file to values-anthropic-overlay.yaml locally and replace the
+# placeholder. Do not commit the copied file.
+
+config:
+  llmBootstrapEnabled: "true"
+  llmBootstrapProvider: "ANTHROPIC"
+  llmBootstrapModel: "claude-sonnet-4-5"
+  llmBootstrapConnectionName: "Anthropic Production"
+  llmBootstrapBaseUrl: "https://api.anthropic.com"
+  llmBootstrapApiKeyRef: "env:ANTHROPIC_API_KEY"
+  llmBootstrapAgentName: "Manual PharmaTrace Hedera Lot Anchor Agent"
+
+secret:
+  create: true
+  data:
+    ANTHROPIC_API_KEY: "REPLACE_WITH_ANTHROPIC_API_KEY"

@@ -16,6 +16,9 @@ export const PHARMATRACE_TOOLS: McpToolDefinition[] = [
       type: 'object',
       properties: {
         lotIds: { type: 'array', items: uuidProperty('Batch lot UUID.') },
+        newStatus: { type: 'string', enum: ['DELIVERY'], description: 'Fabric status to apply before anchoring.' },
+        transactionCode: { type: 'string', description: 'Fabric status transaction code. Defaults to 002.' },
+        organization: { type: 'string', description: 'Organization passed to the Fabric status mutation.' },
       },
       required: ['lotIds'],
       additionalProperties: false,
@@ -35,7 +38,22 @@ export const PHARMATRACE_TOOLS: McpToolDefinition[] = [
         page: { type: 'integer', minimum: 1, description: 'One-based page number.' },
         size: { type: 'integer', minimum: 1, maximum: 500, description: 'Page size.' },
         search: { type: 'string', description: 'Optional lot search text.' },
-        sortBy: { type: 'string', description: 'Optional sort field.' },
+        sortWith: { type: 'string', description: 'Optional sort column, for example updatedOn.' },
+        sortBy: { type: 'string', enum: ['ASC', 'DESC'], description: 'Optional sort direction.' },
+        filter: {
+          type: 'array',
+          description: 'Optional PageInput filters. For lot anchoring use fabricStatus and hederaStatus.',
+          items: {
+            type: 'object',
+            properties: {
+              column: { type: 'string', enum: ['fabricStatus', 'hederaStatus'] },
+              start: { type: 'string' },
+              end: { type: 'string' },
+            },
+            required: ['column', 'start', 'end'],
+            additionalProperties: false,
+          },
+        },
       },
       required: ['page', 'size'],
       additionalProperties: false,
@@ -174,6 +192,8 @@ export const DEFAULT_GRAPHQL_DOCUMENTS: Record<string, string> = {
           expirationDate
           processedTime
           status
+          fabricStatus
+          hederaStatus
           productId
           manufacturingSite
           lotType

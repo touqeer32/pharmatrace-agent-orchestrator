@@ -4,6 +4,7 @@ import { McpServer, McpToolRecord } from '../mcp/mcp.types';
 import { KeycloakAuthService } from './keycloak-auth.service';
 import { PharmaTraceNormalizerService } from './pharmatrace-normalizer.service';
 import { DEFAULT_GRAPHQL_DOCUMENTS } from './pharmatrace-tools';
+import { AgentAuditService } from '../execution/agent-audit.service';
 
 interface GraphqlResponse {
   data?: Record<string, unknown>;
@@ -17,12 +18,14 @@ export class PharmaTraceGraphqlService {
   constructor(
     private readonly auth: KeycloakAuthService,
     private readonly normalizer: PharmaTraceNormalizerService,
+    private readonly agentAudit: AgentAuditService,
   ) {}
 
   async execute(
     server: McpServer,
     tool: McpToolRecord,
     variables: JsonObject,
+    auditContext?: { tenantId: string; workflowId: string; actorId: string },
   ): Promise<unknown> {
     // Authentication must always complete before a protected GraphQL/MCP call.
     const accessToken = await this.auth.getAccessToken(server);
@@ -58,18 +61,45 @@ export class PharmaTraceGraphqlService {
       });
     }
 
-    const response = await fetch(server.endpoint, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${accessToken}`,
-        ...(server.tenant_id ? { tenantid: server.tenant_id } : {}),
-        ...(server.tenant_id ? { 'x-tenant-id': server.tenant_id } : {}),
-        'Content-Type': 'application/json',
-        Accept: 'application/json',
-      },
-      body: JSON.stringify({ query, variables: requestVariables }),
-      signal: AbortSignal.timeout(Number(process.env.MCP_REQUEST_TIMEOUT_MS ?? 30_000)),
-    });
+    if (auditContext) {
+      await this.agentAudit.record({
+        tenantId: auditContext.tenantId,
+        workflowId: auditContext.workflowId,
+        actorId: auditContext.actorId,
+        actionType: 'UPSTREAM_GRAPHQL_CALL_STARTED',
+        resourceType: 'GRAPHQL_API',
+        resourceId: tool.operation_name,
+        status: 'STARTED',
+        description: `GraphQL ${tool.operation_name} started`,
+        privateData: { endpoint: server.endpoint, tool: tool.name, variables: requestVariables },
+      });
+    }
+
+    let response: Response;
+    try {
+      response = await fetch(server.endpoint, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          ...(server.tenant_id ? { tenantid: server.tenant_id } : {}),
+          ...(server.tenant_id ? { 'x-tenant-id': server.tenant_id } : {}),
+          'Content-Type': 'application/json',
+          Accept: 'application/json',
+        },
+        body: JSON.stringify({ query, variables: requestVariables }),
+        signal: AbortSignal.timeout(Number(process.env.MCP_REQUEST_TIMEOUT_MS ?? 30_000)),
+      });
+    } catch (error) {
+      if (auditContext) {
+        await this.agentAudit.record({
+          tenantId: auditContext.tenantId, workflowId: auditContext.workflowId, actorId: auditContext.actorId,
+          actionType: 'UPSTREAM_GRAPHQL_CALL_FAILED', resourceType: 'GRAPHQL_API', resourceId: tool.operation_name,
+          status: 'FAILED', description: `GraphQL ${tool.operation_name} failed`,
+          privateData: { endpoint: server.endpoint, tool: tool.name, error: error instanceof Error ? error.message : String(error) },
+        });
+      }
+      throw error;
+    }
 
     if (response.status === 401 || response.status === 403) {
       this.auth.invalidate(server.id);
@@ -78,6 +108,14 @@ export class PharmaTraceGraphqlService {
 
     if (!response.ok) {
       const details = (await response.text()).slice(0, 1000);
+      if (auditContext) {
+        await this.agentAudit.record({
+          tenantId: auditContext.tenantId, workflowId: auditContext.workflowId, actorId: auditContext.actorId,
+          actionType: 'UPSTREAM_GRAPHQL_CALL_FAILED', resourceType: 'GRAPHQL_API', resourceId: tool.operation_name,
+          status: 'FAILED', description: `GraphQL ${tool.operation_name} returned HTTP ${response.status}`,
+          privateData: { endpoint: server.endpoint, tool: tool.name, httpStatus: response.status },
+        });
+      }
       throw new BadGatewayException(
         `PharmaTrace GraphQL returned HTTP ${response.status}${details ? `: ${details}` : ''}`,
       );
@@ -95,11 +133,28 @@ export class PharmaTraceGraphqlService {
     const payload = (await response.json()) as GraphqlResponse;
 
     if (payload.errors?.length) {
+      if (auditContext) {
+        await this.agentAudit.record({
+          tenantId: auditContext.tenantId, workflowId: auditContext.workflowId, actorId: auditContext.actorId,
+          actionType: 'UPSTREAM_GRAPHQL_CALL_FAILED', resourceType: 'GRAPHQL_API', resourceId: tool.operation_name,
+          status: 'FAILED', description: `GraphQL ${tool.operation_name} returned errors`,
+          privateData: { endpoint: server.endpoint, tool: tool.name, errors: payload.errors },
+        });
+      }
       throw new BadGatewayException(
         payload.errors.map((item) => item.message ?? 'Unknown GraphQL error').join('; '),
       );
     }
 
-    return this.normalizer.normalize(tool.name, payload.data?.[tool.operation_name]);
+    const normalized = this.normalizer.normalize(tool.name, payload.data?.[tool.operation_name]);
+    if (auditContext) {
+      await this.agentAudit.record({
+        tenantId: auditContext.tenantId, workflowId: auditContext.workflowId, actorId: auditContext.actorId,
+        actionType: 'UPSTREAM_GRAPHQL_CALL_COMPLETED', resourceType: 'GRAPHQL_API', resourceId: tool.operation_name,
+        status: 'COMPLETED', description: `GraphQL ${tool.operation_name} completed`,
+        privateData: { endpoint: server.endpoint, tool: tool.name, httpStatus: response.status },
+      });
+    }
+    return normalized;
   }
 }

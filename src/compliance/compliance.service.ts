@@ -315,9 +315,36 @@ export class ComplianceService {
   async createReport(tenant: TenantContext, dto: CreateComplianceReportDto) {
     const reportJson = dto.report ?? {};
     const sourceData = dto.sourceData ?? {};
-    const evidenceDigest = dto.evidenceDigest ?? digest(dto.findings ?? []);
     const sourceDataDigest = dto.sourceDataDigest ?? digest(sourceData);
     const recordId = dto.recordId ?? (dto.profileId ?? null);
+    const normalizedFindings = (dto.findings ?? []).map((finding: any, index: number) => {
+      const suppliedRuleId = typeof finding?.ruleId === 'string' ? finding.ruleId.trim() : '';
+      if (suppliedRuleId) return { ...finding, ruleId: suppliedRuleId };
+
+      const fallbackRuleId = `UNMAPPED-${digest({
+        agentType: dto.agentType,
+        recordType: dto.recordType ?? null,
+        recordId,
+        index,
+        title: finding?.title ?? null,
+        field: finding?.field ?? null,
+        comment: finding?.comment ?? null,
+      }).slice(0, 32)}`;
+      this.logger.warn('Finding did not include ruleId; using stable unmapped rule identifier', {
+        agentType: dto.agentType,
+        recordId,
+        index,
+        fallbackRuleId,
+      });
+      return {
+        ...finding,
+        ruleId: fallbackRuleId,
+        title: typeof finding?.title === 'string' && finding.title.trim()
+          ? finding.title
+          : `Unmapped finding ${index + 1}`,
+      };
+    });
+    const evidenceDigest = dto.evidenceDigest ?? digest(normalizedFindings);
     const recordFingerprint = dto.recordFingerprint ?? (recordId ? digest({
       recordType: dto.recordType ?? 'PROFILE',
       recordId,
@@ -334,7 +361,7 @@ export class ComplianceService {
       sourceSystem: dto.sourceSystem ?? null,
       recordFingerprint,
       resultStatus: dto.resultStatus,
-      findings: dto.findings ?? [],
+      findings: normalizedFindings,
     });
     const reportDigest = digest({
       agentType: dto.agentType,
@@ -355,7 +382,7 @@ export class ComplianceService {
       supersedesReportId: dto.supersedesReportId ?? null,
       revisionReason: dto.revisionReason ?? null,
     });
-    const requiredFindingCount = (dto.findings ?? []).filter(
+    const requiredFindingCount = normalizedFindings.filter(
       (finding) => finding.requiresResolution !== false,
     ).length;
     const initialReviewPolicy = {
@@ -425,7 +452,7 @@ export class ComplianceService {
       );
       const report = reportResult.rows[0];
 
-      for (const finding of dto.findings ?? []) {
+      for (const finding of normalizedFindings) {
         await client.query(
           `INSERT INTO compliance_findings
             (tenant_id, report_id, rule_id, status, severity, title, comment, recommendation, evidence, requires_resolution)

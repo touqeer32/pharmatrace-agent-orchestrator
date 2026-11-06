@@ -1,8 +1,17 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-: "${API:?Set API, for example http://localhost:8800/api/v1}"
-: "${SERVICE_API_KEY:?Set SERVICE_API_KEY}"
+for env_file in .env .env.local; do
+  if [[ -f "$env_file" ]]; then
+    set -a
+    # shellcheck disable=SC1090
+    source "$env_file"
+    set +a
+  fi
+done
+
+API="${API:-http://localhost:8800/api/v1}"
+: "${SERVICE_API_KEY:?Set SERVICE_API_KEY in .env or the shell}"
 
 TENANT_ID="${TENANT_ID:-f6b27eb5-5d5a-4f84-8016-45e2e1193aa1}"
 USER_ID="${USER_ID:-22222222-2222-4222-8222-222222222222}"
@@ -11,8 +20,9 @@ LIMIT="${LIMIT:-500}"
 MIN_EVENTS="${MIN_EVENTS:-2}"
 WINDOW_DAYS="${WINDOW_DAYS:-365}"
 RESET_REPORTS="${RESET_REPORTS:-false}"
-MODEL="${MODEL:-qwen2.5:7b-instruct}"
-OLLAMA_BASE_URL="${OLLAMA_BASE_URL:-http://127.0.0.1:11434/v1}"
+LLM_PROVIDER="${LLM_PROVIDER:-ANTHROPIC}"
+MODEL="${MODEL:-claude-sonnet-4-5}"
+RUN_AGENT="${RUN_AGENT:-false}"
 
 case "$PATTERN_FAMILY" in
   recall) TOOL_NAME=run_recall_pattern_compliance; LABEL=recall ;;
@@ -32,31 +42,40 @@ curl -fsS -X POST "$API/mcp/servers/$server_id/sync-tools" "${headers[@]}" | jq
 tools=$(curl -fsS "$API/mcp/tools?serverId=$server_id" "${headers[@]}")
 tool_id=$(echo "$tools" | jq -er --arg name "$TOOL_NAME" '.[] | select(.name == $name and .enabled == true) | .id' | head -n 1)
 
-if [[ -z "${OLLAMA_CONNECTION_ID:-}" ]]; then
-  : "${OLLAMA_API_KEY:?Set OLLAMA_API_KEY}"
-  connection_name="Local Ollama Pattern Compliance"
+case "$LLM_PROVIDER" in
+  ANTHROPIC) LLM_CONNECTION_ID="${LLM_CONNECTION_ID:-${ANTHROPIC_CONNECTION_ID:-}}"; LLM_API_KEY="${ANTHROPIC_API_KEY:-}"; LLM_BASE_URL="${ANTHROPIC_BASE_URL:-https://api.anthropic.com}"; LLM_SECRET_REF="env:ANTHROPIC_API_KEY" ;;
+  OLLAMA) LLM_CONNECTION_ID="${LLM_CONNECTION_ID:-${OLLAMA_CONNECTION_ID:-}}"; LLM_API_KEY="${OLLAMA_API_KEY:-}"; LLM_BASE_URL="${OLLAMA_BASE_URL:-http://127.0.0.1:11434/v1}"; LLM_SECRET_REF="env:OLLAMA_API_KEY" ;;
+  OPENAI) LLM_CONNECTION_ID="${LLM_CONNECTION_ID:-${OPENAI_CONNECTION_ID:-}}"; LLM_API_KEY="${OPENAI_API_KEY:-}"; LLM_BASE_URL="${OPENAI_BASE_URL:-https://api.openai.com/v1}"; LLM_SECRET_REF="env:OPENAI_API_KEY" ;;
+  *) echo "Unsupported LLM_PROVIDER: $LLM_PROVIDER" >&2; exit 1 ;;
+esac
+CONNECTION_NAME="${CONNECTION_NAME:-PharmaTrace $LABEL Pattern Compliance $LLM_PROVIDER}"
+if [[ -z "$LLM_CONNECTION_ID" ]]; then
   connections=$(curl -fsS "$API/llm/connections" "${headers[@]}")
-  OLLAMA_CONNECTION_ID=$(echo "$connections" | jq -r --arg name "$connection_name" '.[]? | select(.name == $name) | .id' | head -n 1)
-  if [[ -z "$OLLAMA_CONNECTION_ID" ]]; then
-    OLLAMA_CONNECTION_ID=$(curl -fsS -X POST "$API/llm/connections" "${headers[@]}" -H 'content-type: application/json' -d \
-      "{\"provider\":\"OLLAMA\",\"name\":\"$connection_name\",\"apiKeySecretRef\":\"env:OLLAMA_API_KEY\",\"baseUrl\":\"$OLLAMA_BASE_URL\"}" | jq -er '.id')
-  else
-    echo "Reusing Ollama connection: $OLLAMA_CONNECTION_ID"
+  LLM_CONNECTION_ID=$(echo "$connections" | jq -r --arg name "$CONNECTION_NAME" --arg provider "$LLM_PROVIDER" '.[]? | select(.name == $name and .provider == $provider) | .id' | head -n 1)
+  if [[ -z "$LLM_CONNECTION_ID" ]]; then
+    LLM_CONNECTION_ID=$(echo "$connections" | jq -r --arg provider "$LLM_PROVIDER" '.[]? | select(.provider == $provider and (.enabled // true) == true) | .id' | head -n 1)
   fi
 fi
-
-connection=$(curl -fsS "$API/llm/connections/$OLLAMA_CONNECTION_ID" "${headers[@]}")
-connection_base_url=$(echo "$connection" | jq -r '.base_url // .baseUrl // empty')
-if [[ "$connection_base_url" != "$OLLAMA_BASE_URL" ]]; then
-  curl -fsS -X PATCH "$API/llm/connections/$OLLAMA_CONNECTION_ID" "${headers[@]}" -H 'content-type: application/json' \
-    -d "{\"baseUrl\":\"$OLLAMA_BASE_URL\",\"apiKeySecretRef\":\"env:OLLAMA_API_KEY\"}" >/dev/null
+if [[ -z "$LLM_CONNECTION_ID" ]]; then
+  LLM_CONNECTION_ID=$(curl -fsS -X POST "$API/llm/connections" "${headers[@]}" -H 'content-type: application/json' -d \
+    "{\"provider\":\"$LLM_PROVIDER\",\"name\":\"$CONNECTION_NAME\",\"apiKeySecretRef\":\"$LLM_SECRET_REF\",\"baseUrl\":\"$LLM_BASE_URL\"}" | jq -er '.id')
+else
+  echo "Reusing $LLM_PROVIDER connection: $LLM_CONNECTION_ID"
 fi
-curl -fsS -X POST "$API/llm/connections/$OLLAMA_CONNECTION_ID/test" "${headers[@]}" -H 'content-type: application/json' \
-  -d "{\"model\":\"$MODEL\"}" | jq
+connection=$(curl -fsS "$API/llm/connections/$LLM_CONNECTION_ID" "${headers[@]}")
+connection_base_url=$(echo "$connection" | jq -r '.base_url // .baseUrl // empty')
+if [[ "$connection_base_url" != "$LLM_BASE_URL" ]]; then
+  curl -fsS -X PATCH "$API/llm/connections/$LLM_CONNECTION_ID" "${headers[@]}" -H 'content-type: application/json' \
+    -d "{\"baseUrl\":\"$LLM_BASE_URL\",\"apiKeySecretRef\":\"$LLM_SECRET_REF\"}" >/dev/null
+fi
+if [[ "$RUN_AGENT" == "true" ]]; then
+  curl -fsS -X POST "$API/llm/connections/$LLM_CONNECTION_ID/test" "${headers[@]}" -H 'content-type: application/json' \
+    -d "{\"model\":\"$MODEL\"}" | jq
+fi
 
 AGENT_NAME="${AGENT_NAME:-PharmaTrace $LABEL Pattern Compliance Agent}"
-agent_payload=$(jq -n --arg name "$AGENT_NAME" --arg label "$LABEL" --arg connection "$OLLAMA_CONNECTION_ID" --arg model "$MODEL" --arg server "$server_id" --arg tool "$tool_id" --argjson limit "$LIMIT" --argjson minEvents "$MIN_EVENTS" --argjson windowDays "$WINDOW_DAYS" --argjson reset "$RESET_REPORTS" \
-  '{name:$name,description:("Detect repeated " + $label + " patterns from real PharmaTrace records."),expectedOutput:"Return only evidence-backed pattern summaries and remediation instructions in English.",triggerMode:"MANUAL",llmConnectionId:$connection,llmProvider:"OLLAMA",llmModel:$model,maxIterations:1,maxToolCalls:1,defaultInput:{limit:$limit,minEvents:$minEvents,windowDays:$windowDays,resetReports:$reset},allowedMcpServerIds:[$server],allowedMcpToolIds:[$tool]}')
+agent_payload=$(jq -n --arg name "$AGENT_NAME" --arg label "$LABEL" --arg connection "$LLM_CONNECTION_ID" --arg provider "$LLM_PROVIDER" --arg model "$MODEL" --arg server "$server_id" --arg tool "$tool_id" --argjson limit "$LIMIT" --argjson minEvents "$MIN_EVENTS" --argjson windowDays "$WINDOW_DAYS" --argjson reset "$RESET_REPORTS" \
+  '{name:$name,description:("Detect repeated " + $label + " patterns from real PharmaTrace records."),expectedOutput:"Return only evidence-backed pattern summaries and remediation instructions in English.",triggerMode:"MANUAL",llmConnectionId:$connection,llmProvider:$provider,llmModel:$model,maxIterations:1,maxToolCalls:1,defaultInput:{limit:$limit,minEvents:$minEvents,windowDays:$windowDays,resetReports:$reset},allowedMcpServerIds:[$server],allowedMcpToolIds:[$tool]}')
 agent_id=""
 if [[ -n "${AGENT_ID:-}" ]]; then
   candidate=$(curl -sS "$API/agents/$AGENT_ID" "${headers[@]}" || true)
@@ -80,6 +99,12 @@ if [[ -z "$agent_id" ]]; then
     echo "$agent" | jq
     agent_id=$(echo "$agent" | jq -er '.id')
   fi
+fi
+if [[ "$RUN_AGENT" != "true" ]]; then
+  echo "Agent created/updated for UI-triggered runs."
+  echo "AGENT_ID=$agent_id"
+  echo "Set RUN_AGENT=true to trigger a run from the command line."
+  exit 0
 fi
 run=$(curl -fsS -X POST "$API/agents/$agent_id/run" "${headers[@]}" -H 'content-type: application/json' -d \
   "{\"query\":\"Fetch real $LABEL records through MCP, group repeated patterns, create reports only for new patterns, and return a compact English summary.\",\"input\":{\"limit\":$LIMIT,\"minEvents\":$MIN_EVENTS,\"windowDays\":$WINDOW_DAYS,\"resetReports\":$RESET_REPORTS},\"forceReplan\":true}")

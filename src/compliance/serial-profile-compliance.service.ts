@@ -150,7 +150,11 @@ export class SerialProfileComplianceService {
     // Load the source collection before applying LIMIT. Otherwise LIMIT=1
     // repeatedly returns the first already-reported profile and never reaches
     // the next eligible profile.
-    const sourceProfiles = input.profiles ?? await this.loadProfiles(tenant, 500, family);
+    const loadedProfiles = input.profiles ?? await this.loadProfiles(tenant, 500, family);
+    // The source services are authoritative. Keep this guard as a safety net
+    // so a stale cache or a caller-supplied profile list cannot reprocess a
+    // profile already marked as reported upstream.
+    const sourceProfiles = loadedProfiles.filter((profile) => profile.isReported !== true);
     const config = this.agentConfig(family);
     const agentType = config.agentType;
     const recordType = family;
@@ -283,6 +287,15 @@ export class SerialProfileComplianceService {
         creatorPublicKey: process.env.AGENT_REPORT_CREATOR_PUBLIC_KEY,
         requiresApproval: true,
       });
+      if (family === 'GDTI_PROFILE') {
+        await this.markGdtiProfileReported(tenant, profile, report.id);
+      }
+      if (family === 'SSCC_PROFILE') {
+        await this.markGraphqlProfileReported(tenant, profile, report.id, 'updateSsccProfileReports', 'SSCC Profile Compliance Report');
+      }
+      if (family === 'SERIAL_NUMBER_PROFILE') {
+        await this.markSerialProfileReported(tenant, profile, report.id);
+      }
       reports.push({ ...report, sourceProfile: this.sanitizeProfile(profile) });
     }
 
@@ -574,19 +587,21 @@ export class SerialProfileComplianceService {
       Accept: 'application/json',
     };
     const queries: Record<string, string> = {
-      SSCC_PROFILE: 'query { allSsccProfiles { id ssccProfileName startNumber incrementBy numberRangeSize thresholdPercentage externalSystem status index companyPrefix metadata epcFilterValue extensionDigit remaining currentNumber createdOn } }',
-      GDTI_PROFILE: 'query { allGdtiProfiles { id name incrementBy currentNumber startNumber numberRangeSize thresholdPercentage externalSystem status index remaining metadata companyPrefix epcFilterValue documentType isDelete realmName createdOn } }',
+      SSCC_PROFILE: 'query { allSsccProfiles(isReported: false) { id ssccProfileName startNumber incrementBy numberRangeSize thresholdPercentage externalSystem status index companyPrefix metadata epcFilterValue extensionDigit remaining currentNumber createdOn isReported reportIds { id reportName } } }',
+      GDTI_PROFILE: 'query { allGdtiProfiles(isReported: false) { id name incrementBy currentNumber startNumber numberRangeSize thresholdPercentage externalSystem status index remaining metadata companyPrefix epcFilterValue documentType isDelete realmName createdOn isReported reportIds { id reportName } } }',
     };
+    const requestUrl = new URL(server.endpoint);
+    if (family === 'SERIAL_NUMBER_PROFILE') requestUrl.searchParams.set('isReported', 'false');
     this.logger.log('Loading serial profiles', {
       tenantId,
       actorId: tenant.userId,
       family,
-      endpoint: new URL(server.endpoint).pathname,
+      endpoint: requestUrl.pathname + requestUrl.search,
       limit,
     });
     let response: Response;
     try {
-      response = await fetch(server.endpoint, {
+      response = await fetch(requestUrl, {
         method: family === 'SERIAL_NUMBER_PROFILE' ? 'GET' : 'POST',
         headers: family === 'SERIAL_NUMBER_PROFILE' ? headers : { ...headers, 'Content-Type': 'application/json' },
         body: family === 'SERIAL_NUMBER_PROFILE' ? undefined : JSON.stringify({ query: queries[family] }),
@@ -597,7 +612,7 @@ export class SerialProfileComplianceService {
         tenantId,
         actorId: tenant.userId,
         family,
-        endpoint: new URL(server.endpoint).pathname,
+        endpoint: requestUrl.pathname + requestUrl.search,
         error: error instanceof Error ? error.message : String(error),
       });
       throw error;
@@ -612,7 +627,7 @@ export class SerialProfileComplianceService {
         tenantId,
         actorId: tenant.userId,
         family,
-        endpoint: new URL(server.endpoint).pathname,
+        endpoint: requestUrl.pathname + requestUrl.search,
         status: response.status,
         response: body.slice(0, 1000),
       });
@@ -630,12 +645,121 @@ export class SerialProfileComplianceService {
       tenantId,
       actorId: tenant.userId,
       family,
-      endpoint: new URL(server.endpoint).pathname,
+      endpoint: requestUrl.pathname + requestUrl.search,
       httpStatus: response.status,
       sourceRecordCount: profiles.length,
       selectedRecordCount: selectedProfiles.length,
     });
     return selectedProfiles;
+  }
+
+  private async markGraphqlProfileReported(
+    tenant: TenantContext,
+    profile: Profile,
+    reportId: string,
+    mutationName: string,
+    reportName: string,
+  ): Promise<void> {
+    const profileId = text(profile.id || profile.profileId || profile.identifier);
+    const endpoint = process.env.SERIAL_PROFILE_GDTI_API_URL ?? 'https://pt-snm-gdti.k8s.pharmatrace.io/graphql';
+    const server = this.profileSourceServer(tenant, endpoint);
+    const accessToken = await this.auth.getAccessToken(server);
+    const query = `mutation { ${mutationName}(input: { id: "${profileId}", isReported: true, reportIds: [{ id: "${reportId}", reportName: "${reportName}" }] }) { status message } }`;
+    const response = await fetch(endpoint, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${accessToken}`, tenantid: tenant.tenantId, 'x-tenant-id': tenant.tenantId, 'x-user-id': tenant.userId, 'Content-Type': 'application/json', Accept: 'application/json' },
+      body: JSON.stringify({ query }),
+      signal: AbortSignal.timeout(Number(process.env.MCP_REQUEST_TIMEOUT_MS ?? 30_000)),
+    });
+    const body = await response.text();
+    if (!response.ok || body.includes('"errors"')) throw new BadRequestException(`${mutationName} failed: ${body.slice(0, 500)}`);
+    this.logger.log('Profile marked as reported', { tenantId: tenant.tenantId, actorId: tenant.userId, reportName, profileId, reportId, endpoint: new URL(endpoint).pathname });
+  }
+
+  private async markSerialProfileReported(tenant: TenantContext, profile: Profile, reportId: string): Promise<void> {
+    const endpoint = process.env.SERIAL_PROFILE_API_URL ?? 'https://ser-snm.k8s.pharmatrace.io/getAllProfiles';
+    const updateUrl = new URL(endpoint);
+    updateUrl.pathname = updateUrl.pathname.replace(/\/getAllProfiles\/?$/, '/updateProfileReports');
+    const accessToken = await this.auth.getAccessToken(this.profileSourceServer(tenant, endpoint));
+    const response = await fetch(updateUrl, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${accessToken}`, tenantid: tenant.tenantId, 'x-tenant-id': tenant.tenantId, 'x-user-id': tenant.userId, 'Content-Type': 'application/json', Accept: 'application/json' },
+      body: JSON.stringify({ id: text(profile.id || profile.profileId || profile.identifier), isReported: true, reportIds: [{ id: reportId, reportName: 'Serial Profile Compliance Report' }] }),
+      signal: AbortSignal.timeout(Number(process.env.MCP_REQUEST_TIMEOUT_MS ?? 30_000)),
+    });
+    const body = await response.text();
+    if (!response.ok) throw new BadRequestException(`Serial profile report tracking returned HTTP ${response.status}: ${body.slice(0, 500)}`);
+    this.logger.log('Serial profile marked as reported', { tenantId: tenant.tenantId, actorId: tenant.userId, profileId: text(profile.id || profile.profileId || profile.identifier), reportId, endpoint: updateUrl.pathname });
+  }
+
+  private profileSourceServer(tenant: TenantContext, endpoint: string): McpServer {
+    return { id: `serial-profile-source:${tenant.tenantId}`, tenant_id: tenant.tenantId, name: 'Serial Number Management Profiles', description: null, transport: 'STREAMABLE_HTTP', endpoint, auth_config: { tokenUrl: process.env.KEYCLOAK_TOKEN_URL, clientId: process.env.KEYCLOAK_CLIENT_ID, grantType: process.env.KEYCLOAK_GRANT_TYPE ?? 'password', clientSecretRef: process.env.KEYCLOAK_CLIENT_SECRET ? 'env:KEYCLOAK_CLIENT_SECRET' : undefined, usernameRef: process.env.KEYCLOAK_USERNAME ? 'env:KEYCLOAK_USERNAME' : undefined, passwordRef: process.env.KEYCLOAK_PASSWORD ? 'env:KEYCLOAK_PASSWORD' : undefined }, metadata: { serverType: 'SERIAL_PROFILE_API' }, enabled: true };
+  }
+
+  private async markGdtiProfileReported(
+    tenant: TenantContext,
+    profile: Profile,
+    reportId: string,
+  ): Promise<void> {
+    const profileId = text(profile.id || profile.profileId || profile.identifier);
+    const endpoint = process.env.SERIAL_PROFILE_GDTI_API_URL
+      ?? 'https://pt-snm-gdti.k8s.pharmatrace.io/graphql';
+    const updateUrl = new URL(endpoint);
+    updateUrl.pathname = updateUrl.pathname.replace(/\/graphql\/?$/, '/updateGdtiProfileReports');
+    if (!/updateGdtiProfileReports$/.test(updateUrl.pathname)) {
+      updateUrl.pathname = `${updateUrl.pathname.replace(/\/$/, '')}/updateGdtiProfileReports`;
+    }
+
+    const server: McpServer = {
+      id: `serial-profile-source:${tenant.tenantId}`,
+      tenant_id: tenant.tenantId,
+      name: 'Serial Number Management Profiles',
+      description: null,
+      transport: 'STREAMABLE_HTTP',
+      endpoint,
+      auth_config: {
+        tokenUrl: process.env.KEYCLOAK_TOKEN_URL,
+        clientId: process.env.KEYCLOAK_CLIENT_ID,
+        grantType: process.env.KEYCLOAK_GRANT_TYPE ?? 'password',
+        clientSecretRef: process.env.KEYCLOAK_CLIENT_SECRET ? 'env:KEYCLOAK_CLIENT_SECRET' : undefined,
+        usernameRef: process.env.KEYCLOAK_USERNAME ? 'env:KEYCLOAK_USERNAME' : undefined,
+        passwordRef: process.env.KEYCLOAK_PASSWORD ? 'env:KEYCLOAK_PASSWORD' : undefined,
+      },
+      metadata: { serverType: 'SERIAL_PROFILE_API' },
+      enabled: true,
+    };
+    const accessToken = await this.auth.getAccessToken(server);
+    const response = await fetch(updateUrl, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        tenantid: tenant.tenantId,
+        'x-tenant-id': tenant.tenantId,
+        'x-user-id': tenant.userId,
+        'Content-Type': 'application/json',
+        Accept: 'application/json',
+      },
+      body: JSON.stringify({
+        id: profileId,
+        isReported: true,
+        reportIds: [{
+          id: reportId,
+          reportName: 'GDTI Profile Compliance Report',
+        }],
+      }),
+      signal: AbortSignal.timeout(Number(process.env.MCP_REQUEST_TIMEOUT_MS ?? 30_000)),
+    });
+    const body = await response.text();
+    if (!response.ok) {
+      throw new BadRequestException(`GDTI profile report tracking returned HTTP ${response.status}: ${body.slice(0, 500)}`);
+    }
+    this.logger.log('GDTI profile marked as reported', {
+      tenantId: tenant.tenantId,
+      actorId: tenant.userId,
+      profileId,
+      reportId,
+      endpoint: updateUrl.pathname,
+    });
   }
 
   private evaluate(

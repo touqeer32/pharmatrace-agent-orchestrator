@@ -8,7 +8,6 @@ import { RunStepService } from './run-step.service';
 import { ToolExecutorService } from './tool-executor.service';
 import { McpModule } from '../mcp/mcp.module';
 import { ComplianceModule } from '../compliance/compliance.module';
-import { AgentAuditService } from './agent-audit.service';
 
 @Global()
 @Module({
@@ -16,7 +15,6 @@ import { AgentAuditService } from './agent-audit.service';
   controllers: [ExecutionController],
   providers: [
     RunStepService,
-    AgentAuditService,
     ToolExecutorService,
     ResponseGeneratorService,
     ExecutionLoopService,

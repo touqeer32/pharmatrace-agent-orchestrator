@@ -1,0 +1,7 @@
+apiVersion: v2
+name: pharmatrace-agent-orchestrator
+description: PharmaTrace agent orchestration and compliance report service
+type: application
+version: 0.1.0
+appVersion: "1.0.0"
+

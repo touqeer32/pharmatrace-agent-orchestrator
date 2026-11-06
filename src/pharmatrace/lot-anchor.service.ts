@@ -19,6 +19,11 @@ const TOKEN_ABI = [
   'function approve(address spender, uint256 amount) returns (bool)',
 ];
 const CREATE_LOT_SELECTOR = '0x591a3a3e';
+// Hashio may currently return an unusably small EVM gas price (for example
+// 244 wei). Hedera rejects those transactions before execution. Keep the
+// minimum explicit so provider fee-data glitches cannot create invalid raw
+// transactions.
+const HEDERA_MIN_GAS_PRICE_WEI = 1_220_000_000_000n;
 
 interface AnchorLot {
   lotId: string;
@@ -28,13 +33,24 @@ interface AnchorLot {
   hedera?: { txHash?: string; kind?: string; status?: string } | null;
 }
 
+interface DeliveryStatusInput {
+  userId: string;
+  newStatus: string;
+  transactionCode: string;
+  organization?: string;
+}
+
 @Injectable()
 export class LotAnchorService {
   private readonly logger = new Logger(LotAnchorService.name);
 
   constructor(private readonly auth: KeycloakAuthService) {}
 
-  async anchorLots(server: McpServer, lotIds: string[]): Promise<JsonObject> {
+  async anchorLots(
+    server: McpServer,
+    lotIds: string[],
+    statusInput: DeliveryStatusInput,
+  ): Promise<JsonObject> {
     try {
       if (!Array.isArray(lotIds)) {
         throw new BadRequestException('lotIds must contain at least one lot UUID');
@@ -77,7 +93,34 @@ export class LotAnchorService {
 
       const results: JsonObject[] = [];
       for (const lotId of lotIds) {
-        results.push(await this.anchorOne(server, manager, walletAddress, lotId));
+        const result = await this.anchorOne(server, manager, walletAddress, lotId, statusInput);
+        results.push(result);
+
+        // Insufficient native HBAR is account-wide, so every following lot
+        // would fail in exactly the same way. Stop immediately instead of
+        // generating a stream of doomed transactions/retries.
+        if (result.status === 'FAILED' && this.isInsufficientFunds(result.error)) {
+          const remainingLots = lotIds.length - results.length;
+          this.logger.error('Lot anchoring stopped because the payer has insufficient funds', {
+            walletAddress,
+            network: hederaNetwork(),
+            failedLotId: lotId,
+            remainingLots,
+          });
+          return {
+            status: 'STOPPED',
+            reason: 'INSUFFICIENT_FUNDS',
+            message: 'Lot anchoring stopped. Fund the configured payer account before retrying.',
+            network: hederaNetwork(),
+            walletAddress,
+            totalRequested: lotIds.length,
+            lotsPushed: results.filter((item) => item.status === 'CONFIRMED').length,
+            lotsSkipped: results.filter((item) => item.status === 'SKIPPED').length,
+            lotsFailed: results.filter((item) => item.status === 'FAILED').length,
+            lotsNotAttempted: remainingLots,
+            results,
+          };
+        }
       }
       return {
         status: 'COMPLETED',
@@ -106,8 +149,10 @@ export class LotAnchorService {
     manager: Contract,
     walletAddress: string,
     lotId: string,
+    statusInput: DeliveryStatusInput,
   ): Promise<JsonObject> {
     try {
+      await this.updateLotStatus(server, lotId, statusInput);
       const lot = await this.getLot(server, lotId);
       if (this.isAnchored(lot)) {
         return { lotId, status: 'SKIPPED', reason: 'Already confirmed on Hedera' };
@@ -137,7 +182,9 @@ export class LotAnchorService {
         const managerAddress = await manager.getAddress();
         if ((await token.allowance(walletAddress, managerAddress)) < feeAmount) {
           this.logger.log('Lot anchor approval started', { lotId, managerAddress, feeTokenAddress });
-          const approval = await token.approve(managerAddress, feeAmount);
+          const approval = await token.approve(managerAddress, feeAmount, {
+            gasPrice: HEDERA_MIN_GAS_PRICE_WEI,
+          });
           approvalTransactionHash = approval.hash;
           await approval.wait();
           this.logger.log('Lot anchor approval confirmed', { lotId, approvalTransactionHash });
@@ -145,7 +192,12 @@ export class LotAnchorService {
       }
 
       this.logger.log('Lot create transaction started', { lotId, lotKey: lot.lotKey });
-      const transaction = await manager.createLot(lot.lotKey, lot.merkleRoot, lot.fabricSeal);
+      const transaction = await manager.createLot(
+        lot.lotKey,
+        lot.merkleRoot,
+        lot.fabricSeal,
+        { gasPrice: HEDERA_MIN_GAS_PRICE_WEI },
+      );
       const receipt = await transaction.wait();
       if (!receipt || receipt.status !== 1) throw new Error('createLot transaction did not succeed');
       this.logger.log('Lot create transaction confirmed', {
@@ -170,6 +222,52 @@ export class LotAnchorService {
       this.logger.error('Lot anchor failed', { lotId, error: message });
       return { lotId, status: 'FAILED', error: message };
     }
+  }
+
+  private async updateLotStatus(
+    server: McpServer,
+    lotId: string,
+    input: DeliveryStatusInput,
+  ): Promise<void> {
+    const token = await this.auth.getAccessToken(server);
+    const organization = input.organization?.trim() || process.env.PHARMATRACE_ORGANIZATION || 'Pharmatrace';
+    const quote = (value: string) => JSON.stringify(value);
+    const mutation = `mutation updateLotStatusBlock {
+      updateLotStatusBlock(
+        lotId: ${quote(lotId)}
+        newStatus: ${input.newStatus}
+        input: {
+          transactionCode: ${quote(input.transactionCode)}
+          userId: ${quote(input.userId)}
+          organization: ${quote(organization)}
+        }
+      )
+    }`;
+
+    this.logger.log('Lot Fabric status update started', {
+      tenantId: server.tenant_id,
+      lotId,
+      newStatus: input.newStatus,
+      transactionCode: input.transactionCode,
+      organization,
+    });
+    const response = await fetch(server.endpoint, {
+      method: 'POST',
+      headers: this.headers(token, server.tenant_id),
+      body: JSON.stringify({ query: mutation }),
+      signal: AbortSignal.timeout(Number(process.env.MCP_REQUEST_TIMEOUT_MS ?? 30000)),
+    });
+    const payload = await response.json() as {
+      data?: { updateLotStatusBlock?: unknown };
+      errors?: Array<{ message?: string }>;
+    };
+    if (!response.ok || payload.errors?.length || typeof payload.data?.updateLotStatusBlock === 'undefined') {
+      const message = payload.errors?.map((item) => item.message ?? 'GraphQL error').join('; ') ??
+        `PharmaTrace status update returned HTTP ${response.status}`;
+      this.logger.error('Lot Fabric status update failed', { tenantId: server.tenant_id, lotId, error: message });
+      throw new BadGatewayException(message);
+    }
+    this.logger.log('Lot Fabric status update completed', { tenantId: server.tenant_id, lotId, newStatus: input.newStatus });
   }
 
   private async getLot(server: McpServer, lotId: string): Promise<AnchorLot> {
@@ -278,6 +376,14 @@ export class LotAnchorService {
     return Boolean(lot.hedera?.txHash) &&
       lot.hedera?.kind === 'CREATE_LOT' &&
       lot.hedera?.status === 'CONFIRMED';
+  }
+
+  private isInsufficientFunds(error: unknown): boolean {
+    const message = String(error ?? '').toLowerCase();
+    return message.includes('insufficient_funds') ||
+      message.includes('insufficient funds') ||
+      message.includes('insufficient balance') ||
+      message.includes('insufficient hbar');
   }
 
   private assertBytes32(value: string, name: string): void {

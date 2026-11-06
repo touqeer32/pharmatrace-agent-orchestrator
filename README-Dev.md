@@ -618,7 +618,7 @@ helm upgrade --install agent-orchestrator \
 
 
 
-  export TAG="v-$(date +%Y%m%d-%H%M%S)"
+export TAG="v-$(date +%Y%m%d-%H%M%S)"
 
 docker build --platform linux/amd64 -t "$IMAGE:$TAG" .
 docker push "$IMAGE:$TAG"
@@ -659,5 +659,76 @@ helm upgrade --install agent-orchestrator \
 export MAX_ITERATIONS=1
 export MAX_TOOL_CALLS=2
 export FORCE_REPLAN=false
+Current behavior:
+
+- Manual agent scripts: use `OLLAMA`.
+- Production Helm bootstrap defaults: use NVIDIA/OpenAI-compatible provider.
+- Anthropic is only used when the agent connection has:
+  ```json
+  {
+    "provider": "ANTHROPIC",
+    "apiKeySecretRef": "env:ANTHROPIC_API_KEY"
+  }
+  ```
+- Adding the secret alone does not switch existing agents.
+
+Added:
+
+- `values-anthropic-overlay.example.yaml`
+- Persistent Anthropic Helm secret configuration
+- Helm validation for missing `ANTHROPIC_API_KEY`
+- Pod startup validation when Anthropic bootstrap is enabled
+
+Use:
+
+```bash
+cp helm/pharmatrace-agent-orchestrator/values-anthropic-overlay.example.yaml \
+   values-anthropic-overlay.yaml
+```
+
+Put the real key in that untracked file, then deploy:
+
+```bash
+helm upgrade --install agent-orchestrator \
+  ./helm/pharmatrace-agent-orchestrator \
+  -n serialization \
+  -f values-production.yaml \
+  -f values-anthropic-overlay.yaml
+```
+
+If the key is forgotten:
+
+- With Anthropic bootstrap enabled and Helm-managed secrets, Helm fails before deployment.
+- With an existing Kubernetes/External Secret, the pod fails startup if `ANTHROPIC_API_KEY` is missing.
+- Existing NVIDIA/Ollama agents are not changed unless Anthropic bootstrap is enabled.
 
 ./scripts/run-pharmatrace-lot-anchor-agent.sh
+
+
+
+
+export IMAGE="035764999992.dkr.ecr.eu-central-1.amazonaws.com/pt-agent-orchestrator"
+export TAG="v-$(date +%Y%m%d-%H%M%S)"
+
+docker build --platform linux/amd64 -t "$IMAGE:$TAG" .
+docker push "$IMAGE:$TAG"
+
+helm upgrade --install agent-orchestrator \
+  ./helm/pharmatrace-agent-orchestrator \
+  -n serialization \
+  -f values-production.yaml \
+  --set externalSecret.enabled=false \
+  --set secret.create=true \
+  --set ollama.enabled=false \
+  --set image.repository="$IMAGE" \
+  --set image.tag="$TAG" \
+  --set config.llmBootstrapEnabled=true \
+  --set-string config.llmBootstrapProvider=ANTHROPIC \
+  --set-string config.llmBootstrapBaseUrl=https://api.anthropic.com/v1 \
+  --set-string secret.data.ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY" \
+  --wait \
+  --timeout 10m
+
+
+
+  1 * 6

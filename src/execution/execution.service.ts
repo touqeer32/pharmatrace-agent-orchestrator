@@ -60,7 +60,7 @@ export class ExecutionService {
       throw new BadRequestException('This agent is configured for scheduled execution only');
     }
 
-    return (await this.database.one<AgentRunRecord>(
+    const run = (await this.database.one<AgentRunRecord>(
       `INSERT INTO agent_runs
        (agent_id, tenant_id, trigger_source, triggered_by, user_query,
         input_parameters, expected_output_snapshot, llm_provider_snapshot,
@@ -79,6 +79,26 @@ export class ExecutionService {
         dto.forceReplan ?? false,
       ],
     )) as AgentRunRecord;
+
+    await this.agentAudit.record({
+      tenantId: tenant.tenantId,
+      workflowId: run.id,
+      actorType: 'HUMAN',
+      actorId: tenant.userId,
+      actionType: 'AGENT_RUN_TRIGGERED',
+      resourceType: 'AGENT_RUN',
+      resourceId: run.id,
+      status: 'STARTED',
+      description: `Agent run triggered by user ${tenant.userId}`,
+      privateData: {
+        agentId: agent.id,
+        agentName: agent.name,
+        triggerSource: 'UI_MANUAL',
+        query: dto.query ?? null,
+      },
+    });
+
+    return run;
   }
 
   async claim(limit: number): Promise<AgentRunRecord[]> {

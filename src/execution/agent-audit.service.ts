@@ -5,6 +5,7 @@ import { AuditDatabaseService } from '../database/audit-database.service';
 type AgentAuditEvent = {
   tenantId: string;
   workflowId: string;
+  actorType?: 'AGENT' | 'HUMAN' | 'SYSTEM';
   actorId: string;
   actionType: string;
   resourceType: string;
@@ -49,10 +50,11 @@ export class AgentAuditService {
           (tenant_id, workflow_id, actor_type, actor_id, action_type,
            resource_type, resource_id, status, description, private_data,
            previous_event_hash, event_hash, occurred_at)
-         VALUES ($1, $2, 'AGENT', $3, $4, $5, $6, $7, $8, $9::jsonb, $10, $11, $12)`,
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11, $12, $13)`,
         [
           event.tenantId,
           event.workflowId,
+          event.actorType ?? 'AGENT',
           event.actorId,
           event.actionType,
           event.resourceType,

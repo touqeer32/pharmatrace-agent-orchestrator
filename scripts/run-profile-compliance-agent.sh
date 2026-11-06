@@ -1,8 +1,17 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-: "${API:?Set API, for example http://localhost:8800/api/v1}"
-: "${SERVICE_API_KEY:?Set SERVICE_API_KEY}"
+for env_file in .env .env.local; do
+  if [[ -f "$env_file" ]]; then
+    set -a
+    # shellcheck disable=SC1090
+    source "$env_file"
+    set +a
+  fi
+done
+
+API="${API:-http://localhost:8800/api/v1}"
+: "${SERVICE_API_KEY:?Set SERVICE_API_KEY in .env or the shell}"
 
 TENANT_ID="${TENANT_ID:-f6b27eb5-5d5a-4f84-8016-45e2e1193aa1}"
 USER_ID="${USER_ID:-22222222-2222-4222-8222-222222222222}"
@@ -11,12 +20,11 @@ LIMIT="${LIMIT:-1}"
 GENERATE_DEMO_NUMBERS="${GENERATE_DEMO_NUMBERS:-true}"
 DEMO_NUMBER_COUNT="${DEMO_NUMBER_COUNT:-2}"
 RESET_REPORTS="${RESET_REPORTS:-false}"
-MODEL="${MODEL:-qwen2.5:7b-instruct}"
-# Profile compliance testing uses the local Ollama daemon, matching the lot
-# anchor runner. Set OLLAMA_BASE_URL explicitly when the orchestrator is remote.
-OLLAMA_BASE_URL="${OLLAMA_BASE_URL:-http://127.0.0.1:11434/v1}"
+LLM_PROVIDER="${LLM_PROVIDER:-ANTHROPIC}"
+MODEL="${MODEL:-claude-sonnet-4-5}"
 MAX_ITERATIONS="${MAX_ITERATIONS:-1}"
 MAX_TOOL_CALLS="${MAX_TOOL_CALLS:-1}"
+RUN_AGENT="${RUN_AGENT:-false}"
 
 headers=(-H "x-tenant-id: $TENANT_ID" -H "x-user-id: $USER_ID" -H "x-service-api-key: $SERVICE_API_KEY")
 profile_family_lower=$(printf '%s' "$PROFILE_FAMILY" | tr '[:upper:]' '[:lower:]')
@@ -43,38 +51,41 @@ curl -sS --fail-with-body -X POST "$API/mcp/servers/$server_id/sync-tools" "${he
 tools=$(curl -sS --fail-with-body "$API/mcp/tools?serverId=$server_id" "${headers[@]}")
 tool_id=$(echo "$tools" | jq -er --arg name "$TOOL_NAME" '.[] | select(.name == $name and .enabled == true) | .id' | head -n 1)
 
-if [[ -z "${OLLAMA_CONNECTION_ID:-}" ]]; then
-  : "${OLLAMA_API_KEY:?Set OLLAMA_API_KEY}"
-  connection_name="Local Ollama Profile Compliance"
+case "$LLM_PROVIDER" in
+  ANTHROPIC) LLM_CONNECTION_ID="${LLM_CONNECTION_ID:-${ANTHROPIC_CONNECTION_ID:-}}"; LLM_API_KEY="${ANTHROPIC_API_KEY:-}"; LLM_BASE_URL="${ANTHROPIC_BASE_URL:-https://api.anthropic.com}"; LLM_SECRET_REF="env:ANTHROPIC_API_KEY" ;;
+  OLLAMA) LLM_CONNECTION_ID="${LLM_CONNECTION_ID:-${OLLAMA_CONNECTION_ID:-}}"; LLM_API_KEY="${OLLAMA_API_KEY:-}"; LLM_BASE_URL="${OLLAMA_BASE_URL:-http://127.0.0.1:11434/v1}"; LLM_SECRET_REF="env:OLLAMA_API_KEY" ;;
+  OPENAI) LLM_CONNECTION_ID="${LLM_CONNECTION_ID:-${OPENAI_CONNECTION_ID:-}}"; LLM_API_KEY="${OPENAI_API_KEY:-}"; LLM_BASE_URL="${OPENAI_BASE_URL:-https://api.openai.com/v1}"; LLM_SECRET_REF="env:OPENAI_API_KEY" ;;
+  *) echo "Unsupported LLM_PROVIDER: $LLM_PROVIDER" >&2; exit 1 ;;
+esac
+CONNECTION_NAME="${CONNECTION_NAME:-PharmaTrace $LABEL Profile Compliance $LLM_PROVIDER}"
+if [[ -z "$LLM_CONNECTION_ID" ]]; then
   connections=$(curl -sS --fail-with-body "$API/llm/connections" "${headers[@]}")
-  OLLAMA_CONNECTION_ID=$(echo "$connections" | jq -r --arg name "$connection_name" '.[]? | select(.name == $name) | .id' | head -n 1)
-  if [[ -z "$OLLAMA_CONNECTION_ID" ]]; then
-    OLLAMA_CONNECTION_ID=$(curl -sS --fail-with-body -X POST "$API/llm/connections" "${headers[@]}" -H 'content-type: application/json' -d \
-      "{\"provider\":\"OLLAMA\",\"name\":\"$connection_name\",\"apiKeySecretRef\":\"env:OLLAMA_API_KEY\",\"baseUrl\":\"$OLLAMA_BASE_URL\"}" | jq -er '.id')
-  else
-    echo "Reusing Ollama connection: $OLLAMA_CONNECTION_ID"
+  LLM_CONNECTION_ID=$(echo "$connections" | jq -r --arg name "$CONNECTION_NAME" --arg provider "$LLM_PROVIDER" '.[]? | select(.name == $name and .provider == $provider) | .id' | head -n 1)
+  if [[ -z "$LLM_CONNECTION_ID" ]]; then
+    LLM_CONNECTION_ID=$(echo "$connections" | jq -r --arg provider "$LLM_PROVIDER" '.[]? | select(.provider == $provider and (.enabled // true) == true) | .id' | head -n 1)
   fi
 fi
-
-# Existing connections may point at hosted Ollama or at an old endpoint. Make
-# the selected connection match this run so the model is resolved by the same
-# Ollama service that the caller requested.
-connection=$(curl -sS --fail-with-body "$API/llm/connections/$OLLAMA_CONNECTION_ID" "${headers[@]}")
+if [[ -z "$LLM_CONNECTION_ID" ]]; then
+  LLM_CONNECTION_ID=$(curl -sS --fail-with-body -X POST "$API/llm/connections" "${headers[@]}" -H 'content-type: application/json' -d \
+    "{\"provider\":\"$LLM_PROVIDER\",\"name\":\"$CONNECTION_NAME\",\"apiKeySecretRef\":\"$LLM_SECRET_REF\",\"baseUrl\":\"$LLM_BASE_URL\"}" | jq -er '.id')
+else
+  echo "Reusing $LLM_PROVIDER connection: $LLM_CONNECTION_ID"
+fi
+connection=$(curl -sS --fail-with-body "$API/llm/connections/$LLM_CONNECTION_ID" "${headers[@]}")
 connection_base_url=$(echo "$connection" | jq -r '.base_url // .baseUrl // empty')
-if [[ "$connection_base_url" != "$OLLAMA_BASE_URL" ]]; then
-  curl -sS --fail-with-body -X PATCH "$API/llm/connections/$OLLAMA_CONNECTION_ID" "${headers[@]}" \
+if [[ "$connection_base_url" != "$LLM_BASE_URL" ]]; then
+  curl -sS --fail-with-body -X PATCH "$API/llm/connections/$LLM_CONNECTION_ID" "${headers[@]}" -H 'content-type: application/json' \
+    -d "{\"baseUrl\":\"$LLM_BASE_URL\",\"apiKeySecretRef\":\"$LLM_SECRET_REF\"}" >/dev/null
+fi
+if [[ "$RUN_AGENT" == "true" ]]; then
+  echo "Testing $LLM_PROVIDER model $MODEL at $LLM_BASE_URL"
+  curl -sS --fail-with-body -X POST "$API/llm/connections/$LLM_CONNECTION_ID/test" "${headers[@]}" \
     -H 'content-type: application/json' \
-    -d "{\"baseUrl\":\"$OLLAMA_BASE_URL\",\"apiKeySecretRef\":\"env:OLLAMA_API_KEY\"}" >/dev/null
-  echo "Updated Ollama connection endpoint to $OLLAMA_BASE_URL"
+    -d "{\"model\":\"$MODEL\"}" | jq
 fi
 
-echo "Testing Ollama model $MODEL at $OLLAMA_BASE_URL"
-curl -sS --fail-with-body -X POST "$API/llm/connections/$OLLAMA_CONNECTION_ID/test" "${headers[@]}" \
-  -H 'content-type: application/json' \
-  -d "{\"model\":\"$MODEL\"}" | jq
-
 AGENT_NAME="${AGENT_NAME:-PharmaTrace $LABEL Profile Compliance Agent}"
-agent_payload=$(jq -n --arg name "$AGENT_NAME" --arg connection "$OLLAMA_CONNECTION_ID" --arg model "$MODEL" --arg server "$server_id" --arg tool "$tool_id" --argjson iterations "$MAX_ITERATIONS" --argjson calls "$MAX_TOOL_CALLS" --argjson limit "$LIMIT" --argjson generate "$GENERATE_DEMO_NUMBERS" --argjson count "$DEMO_NUMBER_COUNT" --argjson reset "$RESET_REPORTS" --arg label "$LABEL" '{name:$name,description:("Validate real " + $label + " profiles fetched through authenticated MCP."),expectedOutput:"Review one profile at a time using only the supplied rule and evidence. If processed is zero, return NO_DATA. Return only findingId, assessment, comment, and optional instruction.",outputSchema:{type:"object",required:["processingStatus","summary","profiles"],properties:{processingStatus:{type:"string",enum:["COMPLETED","NO_DATA"]},summary:{type:"string"},profiles:{type:"array",items:{type:"object",required:["profileId","resultStatus","findings"],properties:{profileId:{type:"string"},resultStatus:{type:"string",enum:["PASS","FAIL","REVIEW"]},findings:{type:"array",items:{type:"object",required:["findingId","assessment","comment"],properties:{findingId:{type:"string"},assessment:{type:"string",enum:["CONFIRMED","DISPUTED","NEEDS_CONTEXT"]},comment:{type:"string"},instruction:{type:"string"}}}}}}}}},triggerMode:"MANUAL",llmConnectionId:$connection,llmProvider:"OLLAMA",llmModel:$model,maxIterations:$iterations,maxToolCalls:$calls,defaultInput:{limit:$limit,generateDemoNumbers:$generate,demoNumberCount:$count,resetReports:$reset},allowedMcpServerIds:[$server],allowedMcpToolIds:[$tool]}')
+agent_payload=$(jq -n --arg name "$AGENT_NAME" --arg connection "$LLM_CONNECTION_ID" --arg provider "$LLM_PROVIDER" --arg model "$MODEL" --arg server "$server_id" --arg tool "$tool_id" --argjson iterations "$MAX_ITERATIONS" --argjson calls "$MAX_TOOL_CALLS" --argjson limit "$LIMIT" --argjson generate "$GENERATE_DEMO_NUMBERS" --argjson count "$DEMO_NUMBER_COUNT" --argjson reset "$RESET_REPORTS" --arg label "$LABEL" '{name:$name,description:("Validate real " + $label + " profiles fetched through authenticated MCP."),expectedOutput:"Review one profile at a time using only the supplied rule and evidence. If processed is zero, return NO_DATA. Return only findingId, assessment, comment, and optional instruction.",outputSchema:{type:"object",required:["processingStatus","summary","profiles"],properties:{processingStatus:{type:"string",enum:["COMPLETED","NO_DATA"]},summary:{type:"string"},profiles:{type:"array",items:{type:"object",required:["profileId","resultStatus","findings"],properties:{profileId:{type:"string"},resultStatus:{type:"string",enum:["PASS","FAIL","REVIEW"]},findings:{type:"array",items:{type:"object",required:["findingId","assessment","comment"],properties:{findingId:{type:"string"},assessment:{type:"string",enum:["CONFIRMED","DISPUTED","NEEDS_CONTEXT"]},comment:{type:"string"},instruction:{type:"string"}}}}}}}}},triggerMode:"MANUAL",llmConnectionId:$connection,llmProvider:$provider,llmModel:$model,maxIterations:$iterations,maxToolCalls:$calls,defaultInput:{limit:$limit,generateDemoNumbers:$generate,demoNumberCount:$count,resetReports:$reset},allowedMcpServerIds:[$server],allowedMcpToolIds:[$tool]}')
 
 agent_id=""
 if [[ -n "${AGENT_ID:-}" ]]; then
@@ -99,6 +110,12 @@ if [[ -z "$agent_id" ]]; then
     echo "$agent" | jq
     agent_id=$(echo "$agent" | jq -er '.id')
   fi
+fi
+if [[ "$RUN_AGENT" != "true" ]]; then
+  echo "Agent created/updated for UI-triggered runs."
+  echo "AGENT_ID=$agent_id"
+  echo "Set RUN_AGENT=true to trigger a run from the command line."
+  exit 0
 fi
 run=$(curl -sS --fail-with-body -X POST "$API/agents/$agent_id/run" "${headers[@]}" -H 'content-type: application/json' -d \
   "{\"query\":\"Fetch real $LABEL profiles through MCP, reset prior test reports, validate them, review the rules and initial findings, create reports, and return HCS statuses.\",\"input\":{\"limit\":$LIMIT,\"generateDemoNumbers\":$GENERATE_DEMO_NUMBERS,\"demoNumberCount\":$DEMO_NUMBER_COUNT,\"resetReports\":$RESET_REPORTS},\"forceReplan\":true}")

@@ -13,6 +13,15 @@ import { hederaAgentAccountId, hederaAgentKeyType, hederaAgentPrivateKey, hedera
 export class ComplianceHcsService {
   private readonly logger = new Logger(ComplianceHcsService.name);
 
+  // Hedera SDK defaults use a short per-request gRPC deadline and retry up to
+  // ten times. Mainnet can transiently exceed that deadline; keep a bounded
+  // overall request window while allowing each node attempt enough time to
+  // complete. These are intentionally service constants so local and deployed
+  // runs behave identically without another required environment variable.
+  private static readonly HCS_GRPC_DEADLINE_MS = 30_000;
+  private static readonly HCS_REQUEST_TIMEOUT_MS = 120_000;
+  private static readonly HCS_MAX_ATTEMPTS = 10;
+
   constructor(private readonly db: DatabaseService) {}
 
   isConfigured(): boolean {
@@ -79,8 +88,16 @@ export class ComplianceHcsService {
          WHERE id = $3 AND tenant_id = $4`,
         [payload, payloadDigest, attestation.id, tenantId],
       );
-      client = Client.forName(network);
-      client.setOperator(parsedAccountId, privateKey);
+      client = this.createClient(network, parsedAccountId, privateKey);
+      this.logger.log({
+        reportId,
+        tenantId,
+        topicId,
+        network,
+        grpcDeadlineMs: ComplianceHcsService.HCS_GRPC_DEADLINE_MS,
+        requestTimeoutMs: ComplianceHcsService.HCS_REQUEST_TIMEOUT_MS,
+        maxAttempts: ComplianceHcsService.HCS_MAX_ATTEMPTS,
+      });
       const transaction = await new TopicMessageSubmitTransaction()
         .setTopicId(topicId)
         .setMessage(message)
@@ -115,12 +132,13 @@ export class ComplianceHcsService {
       return { submitted: true, confirmed: false, attestation: updated };
     } catch (error) {
       const messageText = error instanceof Error ? error.message : String(error);
+      const status = this.isSubmissionUncertain(messageText) ? 'WAITING_FOR_CONFIRMATION' : 'FAILED';
       await this.db.query(
-        `UPDATE compliance_attestations SET status = 'FAILED', last_error = $1
-         WHERE id = $2 AND tenant_id = $3`,
-        [messageText, attestation.id, tenantId],
+        `UPDATE compliance_attestations SET status = $1, last_error = $2
+         WHERE id = $3 AND tenant_id = $4`,
+        [status, messageText, attestation.id, tenantId],
       );
-      this.logger.error({ reportId, tenantId, topicId, network, error: messageText });
+      this.logger.error({ reportId, tenantId, topicId, network, status, error: messageText });
       throw error;
     } finally {
       client?.close();
@@ -167,8 +185,16 @@ export class ComplianceHcsService {
         `UPDATE compliance_attestations SET payload = $1, payload_digest = $2 WHERE id = $3 AND tenant_id = $4`,
         [payload, payloadDigest, attestationId, tenantId],
       );
-      client = Client.forName(network);
-      client.setOperator(parsedAccountId, privateKey);
+      client = this.createClient(network, parsedAccountId, privateKey);
+      this.logger.log({
+        attestationId,
+        tenantId,
+        topicId,
+        network,
+        grpcDeadlineMs: ComplianceHcsService.HCS_GRPC_DEADLINE_MS,
+        requestTimeoutMs: ComplianceHcsService.HCS_REQUEST_TIMEOUT_MS,
+        maxAttempts: ComplianceHcsService.HCS_MAX_ATTEMPTS,
+      });
       const transaction = await new TopicMessageSubmitTransaction()
         .setTopicId(topicId)
         .setMessage(message)
@@ -196,14 +222,29 @@ export class ComplianceHcsService {
       return { submitted: true, confirmed: false, attestation: updated };
     } catch (error) {
       const messageText = error instanceof Error ? error.message : String(error);
+      const status = this.isSubmissionUncertain(messageText) ? 'WAITING_FOR_CONFIRMATION' : 'FAILED';
       await this.db.query(
-        `UPDATE compliance_attestations SET status = 'FAILED', last_error = $1 WHERE id = $2 AND tenant_id = $3`,
-        [messageText, attestationId, tenantId],
+        `UPDATE compliance_attestations SET status = $1, last_error = $2 WHERE id = $3 AND tenant_id = $4`,
+        [status, messageText, attestationId, tenantId],
       );
+      this.logger.error({ attestationId, tenantId, topicId, network, status, error: messageText });
       throw error;
     } finally {
       client?.close();
     }
+  }
+
+  private createClient(network: string, accountId: AccountId, privateKey: PrivateKey): Client {
+    const client = Client.forName(network)
+      .setGrpcDeadline(ComplianceHcsService.HCS_GRPC_DEADLINE_MS)
+      .setRequestTimeout(ComplianceHcsService.HCS_REQUEST_TIMEOUT_MS)
+      .setMaxAttempts(ComplianceHcsService.HCS_MAX_ATTEMPTS);
+    client.setOperator(accountId, privateKey);
+    return client;
+  }
+
+  private isSubmissionUncertain(message: string): boolean {
+    return /DEADLINE_EXCEEDED|deadline exceeded|MaxAttemptsOrTimeoutError|timeout exceeded|request timed out/i.test(message);
   }
 
   private async lookupMirrorTransaction(transactionId: string): Promise<{ result?: string; consensus_timestamp?: string } | null> {

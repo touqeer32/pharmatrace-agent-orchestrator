@@ -1,0 +1,170 @@
+replicaCount: 1
+
+image:
+  repository: 035764999992.dkr.ecr.eu-central-1.amazonaws.com/pt-agent-orchestrator
+  tag: latest
+  pullPolicy: Always
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  create: true
+  name: ""
+
+service:
+  type: ClusterIP
+  port: 80
+  targetPort: 3000
+
+ingress:
+  enabled: false
+  className: nginx
+  annotations: {}
+  host: agent-orchestrator.example.com
+  path: /
+  tls: []
+
+config:
+  nodeEnv: production
+  corsOrigins: https://firstbucket.k8s.pharmatrace.io
+  databasePoolMax: "15"
+  databaseSsl: "false"
+  databaseSslRejectUnauthorized: "true"
+  auditDbHost: serialization-pg16.remote-systems.svc.cluster.local
+  auditDbPort: "5432"
+  auditDbName: audit_anchor
+  auditDbUser: postgres
+  auditDbSslMode: disable
+  auditDatabasePoolMax: "10"
+  schedulerPollIntervalMs: "15000"
+  executionPollIntervalMs: "3000"
+  executionConcurrency: "3"
+  mcpRequestTimeoutMs: "60000"
+  nvidiaExecutionTimeoutSeconds: "1200"
+  debugGraphqlRequests: "false"
+  debugLlmResponses: "false"
+  debugMcpToolResults: "false"
+  complianceDemoEnabled: "false"
+  hederaNetwork: testnet
+  hederaTopicId: 0.0.10123883
+  hederaTopicIdTestnet: 0.0.10123883
+  hederaTopicIdMainnet: 0.0.10905811
+  hederaRpcUrl: https://testnet.hashio.io/api
+  hederaRpcUrlTestnet: https://testnet.hashio.io/api
+  hederaRpcUrlMainnet: https://mainnet.hashio.io/api
+  mirrorNodeUrl: https://testnet.mirrornode.hedera.com
+  mirrorNodeUrlTestnet: https://testnet.mirrornode.hedera.com
+  mirrorNodeUrlMainnet: https://mainnet.mirrornode.hedera.com
+  pharmatraceGraphqlUrl: https://apigateway.k8s.pharmatrace.io/graphql
+  keycloakTokenUrl: https://kc.k8s.pharmatrace.io/auth/realms/first-bucket/protocol/openid-connect/token
+  keycloakClientId: api
+  keycloakGrantType: password
+  pharmatraceManagerAddress: ""
+  pharmatraceManagerAddressTestnet: ""
+  pharmatraceManagerAddressMainnet: 0xb02B1f06C5074812846E719E00c7d29Fd11c12cb
+  pharmatraceMirrorNodeUrl: https://testnet.mirrornode.hedera.com
+  pharmatraceMirrorNodeUrlTestnet: https://testnet.mirrornode.hedera.com
+  pharmatraceMirrorNodeUrlMainnet: https://mainnet.mirrornode.hedera.com
+  # Hosted Ollama/OpenAI-compatible endpoint. Override for another provider.
+  ollamaBaseUrl: https://ollama.com/v1
+  nvidiaBaseUrl: https://integrate.api.nvidia.com/v1
+  # Use the existing bootstrap settings for the selected provider. Keep
+  # bootstrap disabled by default; production can enable it explicitly.
+  openaiUseChatCompletions: "false"
+  llmBootstrapEnabled: "false"
+  llmBootstrapAgentName: "Manual PharmaTrace Hedera Lot Anchor Agent"
+  llmBootstrapProvider: "ANTHROPIC"
+  llmBootstrapModel: "claude-sonnet-4-5"
+  llmBootstrapConnectionName: "Anthropic Production"
+  llmBootstrapBaseUrl: https://api.anthropic.com
+  llmBootstrapApiKeyRef: env:ANTHROPIC_API_KEY
+  secretStorageDir: /tmp/agent-secrets
+
+# Ollama runs as a separate internal service. The orchestrator connects to it
+# through config.ollamaBaseUrl and never exposes it through Ingress.
+ollama:
+  # Keep disabled when using hosted Ollama. Enable only when the cluster
+  # should download and persist a local model.
+  enabled: false
+  image:
+    repository: ollama/ollama
+    tag: latest
+    pullPolicy: IfNotPresent
+  service:
+    port: 11434
+  model: qwen2.5:7b-instruct
+  persistence:
+    enabled: true
+    size: 20Gi
+    storageClassName: ""
+  resources:
+    requests:
+      cpu: 500m
+      memory: 2Gi
+    limits:
+      cpu: "2"
+      memory: 8Gi
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+# Create this Secret outside Helm and set its name here.
+# It must contain the keys listed in secret.example.yaml.
+secret:
+  create: false
+  existingName: pharmatrace-agent-orchestrator-secrets
+  # Keep the real key out of Git. Supply it with --set-string or an external
+  # secret; this placeholder makes the required key explicit for Helm-managed
+  # test deployments.
+  data:
+    ANTHROPIC_API_KEY: ""
+
+externalSecret:
+  enabled: false
+  secretStoreName: aws-secretsmanager
+  secretStoreKind: ClusterSecretStore
+  remoteKey: serialization/pharmatrace-agent-orchestrator
+  refreshInterval: 1h
+
+migrations:
+  enabled: true
+  backoffLimit: 3
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    cpu: 1000m
+    memory: 1Gi
+
+probes:
+  liveness:
+    initialDelaySeconds: 20
+    periodSeconds: 15
+  readiness:
+    initialDelaySeconds: 10
+    periodSeconds: 10
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  runAsGroup: 1000
+  fsGroup: 1000
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop: [ALL]
+  readOnlyRootFilesystem: true
+  runAsNonRoot: true
+  runAsUser: 1000
+  runAsGroup: 1000
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
